@@ -817,7 +817,7 @@ async function getEmpresaCuentas(
 ): Promise<EmpresaCuentaSeleccionada[]> {
   // Navegar al dashboard para cargar contexto
   await page.goto(EMPRESA_DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 30000 });
-  await delay(3000);
+  await delay(5000);
 
   // Intentar endpoint de productos/cuentas (patrón similar a personas)
   const endpoints = [
@@ -1349,9 +1349,11 @@ async function scrapeEmpresa(
 // ─── Main scraper ────────────────────────────────────────────────
 
 async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
-  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful, bankQuery, empresa } = options;
+  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful, scope, empresa, bankQuery } = options;
   const bank = "bchile";
-  const isEmpresa = empresa === true;
+  // Soporte dual: scope (nuevo) | empresa/bankQuery (deprecated)
+  const isEmpresa = scope?.type === "business" || empresa === true;
+  const empresaRut = scope?.companyRut || bankQuery;
 
   if (!rut || !password) {
     return { success: false, bank, movements: [], error: "Debes proveer RUT y clave." };
@@ -1386,7 +1388,7 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
 
     // ─── Flujo Empresa ─────────────────────────────────────────────
     if (isEmpresa) {
-      return await scrapeEmpresa(page, rut, password, bankQuery ?? null, debugLog, doSave, !!doScreenshots);
+      return await scrapeEmpresa(page, rut, password, empresaRut ?? null, debugLog, doSave, !!doScreenshots);
     }
 
     // ─── Flujo Personas (existente) ─────────────────────────────────

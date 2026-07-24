@@ -50,8 +50,7 @@ Opciones:
   --pretty            Formatear JSON con indentación
   --movements         Solo imprimir movimientos (sin metadata)
   --owner <T|A|B>     Filtro Titular/Adicional para TC (default: B = todos)
-  --bankQuery <RUT>   [BCHILE Empresas] RUT empresa a consultar (ej: 77123456-1). Sin valor usa la empresa seleccionada.
-  --empresa           [BCHILE] Usar portal empresas (requiere --bankQuery o usa empresa seleccionada)
+  --scope <tipo>      Alcance: personal | business | business:RUT (ej: business:77967769-9)
   --help, -h          Mostrar esta ayuda
 
 Variables de entorno:
@@ -136,15 +135,37 @@ Ejemplos:
   const ownerVal = ownerIdx >= 0 ? args[ownerIdx + 1]?.toUpperCase() : undefined;
   const owner = ownerVal === "T" || ownerVal === "A" || ownerVal === "B" ? ownerVal : undefined;
 
-  // Parse --empresa and --bankQuery flags (BCHILE Empresas)
-  const empresaMode = flags.has("--empresa");
-  let bankQuery: string | undefined;
-  const bankQueryArg = args.find((a) => a === "--bankQuery" || a.startsWith("--bankQuery="));
-  if (bankQueryArg) {
-    const val = bankQueryArg.includes("=") ? bankQueryArg.split("=")[1] : args[args.indexOf(bankQueryArg) + 1];
-    bankQuery = val?.trim() || undefined;
+  // Parse --scope flag (replaces --empresa and --bankQuery)
+  let scope: { type: "personal" | "business"; companyRut?: string } | undefined;
+  const scopeArg = args.find((a) => a === "--scope" || a.startsWith("--scope="));
+  if (scopeArg) {
+    let rawScope: string;
+    if (scopeArg.startsWith("--scope=")) {
+      rawScope = scopeArg.split("=")[1];
+    } else {
+      rawScope = args[args.indexOf(scopeArg) + 1] || "";
+    }
+    if (rawScope === "personal") {
+      scope = { type: "personal" };
+    } else if (rawScope === "business") {
+      scope = { type: "business" };
+    } else if (rawScope.startsWith("business:")) {
+      scope = { type: "business", companyRut: rawScope.slice(9) };
+    }
   }
-  const useEmpresa = empresaMode || !!bankQuery;
+  // Fallback: compatibilidad con --empresa / --bankQuery (deprecated)
+  if (!scope) {
+    const empresaMode = flags.has("--empresa");
+    let bankQuery: string | undefined;
+    const bankQueryArg = args.find((a) => a === "--bankQuery" || a.startsWith("--bankQuery="));
+    if (bankQueryArg) {
+      const val = bankQueryArg.includes("=") ? bankQueryArg.split("=")[1] : args[args.indexOf(bankQueryArg) + 1];
+      bankQuery = val?.trim() || undefined;
+    }
+    if (empresaMode || bankQuery) {
+      scope = { type: "business", ...(bankQuery && { companyRut: bankQuery }) };
+    }
+  }
 
   const result = await bank.scrape({
     rut,
@@ -153,7 +174,7 @@ Ejemplos:
     saveScreenshots: flags.has("--screenshots"),
     headful: flags.has("--headful"),
     ...(owner && { owner }),
-    ...(useEmpresa && { empresa: true, bankQuery }),
+    ...(scope && { scope }),
   });
 
   if (!result.success) {

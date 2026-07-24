@@ -117,6 +117,14 @@ export interface BankCredentials {
   password: string;
 }
 
+/** Alcance de la consulta: personal o empresa */
+export interface Scope {
+  /** Tipo de alcance */
+  type: "personal" | "business";
+  /** RUT de la empresa (solo para business) */
+  companyRut?: string;
+}
+
 /** Opciones para el scraper */
 export interface ScraperOptions extends BankCredentials {
   /** Ruta al ejecutable de Chrome/Chromium. Si no se provee, busca automáticamente. */
@@ -127,10 +135,12 @@ export interface ScraperOptions extends BankCredentials {
   headful?: boolean;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */
   owner?: "T" | "A" | "B";
-  /** [BCHILE Empresas] RUT de la empresa a consultar (ej: "77123456-1"). Si se especifica, valida que la empresa esté seleccionada. Si no, usa la empresa actualmente seleccionada. */
-  bankQuery?: string;
-  /** [BCHILE] Usar portal empresas (login.portalempresas). Requiere bankQuery o usa la empresa seleccionada. */
+  /** Alcance: personal (default) o business con RUT de empresa opcional */
+  scope?: Scope;
+  /** @deprecated Use scope.type="business" en su lugar. */
   empresa?: boolean;
+  /** @deprecated Use scope.companyRut en su lugar. */
+  bankQuery?: string;
   /** Callback de progreso para mostrar estado al usuario */
   onProgress?: (step: string) => void;
   /** Callback invocado en cada línea de debug en tiempo real */
