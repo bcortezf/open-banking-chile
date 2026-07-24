@@ -1,68 +1,64 @@
-# Open Banking Chile
+# 🏦 Open Banking Chile
 
-Scrapers open source para bancos chilenos. Obtén tus movimientos bancarios y saldo como JSON limpio.
+[![Licencia MIT](https://img.shields.io/badge/Licencia-MIT-green.svg)](LICENSE)
+[![PRs](https://img.shields.io/badge/PRs-bienvenidos-brightgreen.svg)](CONTRIBUTING.md)
+[![AI Review](https://img.shields.io/badge/AI%20Review-DeepSeek-blueviolet)](.github/workflows/ai-pr-review.yml)
+[![Bancos](https://img.shields.io/badge/bancos-11-blue)](README.md)
+[![Hecho en Chile](https://img.shields.io/badge/Hecho_en-Chile-red?logo=chile)](https://chile)
 
-> **Disclaimer**: Este proyecto no está afiliado con ningún banco. Úsalo bajo tu propia responsabilidad y solo con tus propias credenciales.
+> **Fork comunitario** — Scrapers open source para bancos chilenos.
+> Obtén tus movimientos bancarios y saldo como JSON limpio.
+>
+> 🔄 Mantenido por la comunidad. Fork del proyecto original open-banking-chile (MIT).
 
-## Migración v2 → v3
+**Disclaimer:** Este proyecto no está afiliado con ningún banco. Úsalo bajo tu propia responsabilidad y solo con tus propias credenciales.
 
-**v3.0.0 introduce un cambio breaking en `ScrapeResult`:**
+---
 
-Los movimientos ya no están en un array plano `result.movements` — ahora viven dentro de cada cuenta/tarjeta:
+## 🏛️ Modelo comunitario
 
-| Antes (v2)               | Ahora (v3)                                  |
-| ------------------------ | ------------------------------------------- |
-| `result.movements`       | `result.accounts[i].movements`              |
-| `result.balance`         | `result.accounts[i].balance`                |
-| _(no existía)_           | `result.creditCards[i].movements`           |
+Este proyecto opera con **revisión por pares**. Cada cambio debe ser probado y aprobado por miembros de la comunidad.
 
-```ts
-// v2 (ya no válido)
-console.log(result.balance);
-for (const m of result.movements) { ... }
+| Rol | Descripción |
+|-----|------------|
+| 🤝 **Contribuidor** | Abre PRs con scrapers nuevos o mejoras |
+| 👀 **Revisor** | Prueba PRs con sus propias cuentas bancarias |
+| 🛡️ **Mantenedor** | Revisores con permisos de merge |
 
-// v3
-const cuenta = result.accounts?.[0];
-console.log(cuenta?.balance);
-for (const m of cuenta?.movements ?? []) { ... }
+📖 **[Guía completa de la comunidad](COMMUNITY.md)** · **[Cómo contribuir](CONTRIBUTING.md)** · **[Política de seguridad](SECURITY.md)**
 
-// Movimientos de una tarjeta específica
-for (const card of result.creditCards ?? []) {
-  console.log(card.label, card.movements?.length);
-}
+---
+
+## 🏦 Bancos soportados
+
+| Banco | ID | Estado |
+|-------|----|--------|
+| Banco Falabella (cuenta + CMR TC) | `falabella` | ✅ |
+| Banco BICE | `bice` | ✅ |
+| Santander | `santander` | ✅ |
+| Banco Edwards | `edwards` | ✅ |
+| Scotiabank | `scotiabank` | ✅ |
+| Banco de Chile (personas + empresas) | `bchile` | ✅ |
+| BCI | `bci` | ✅ |
+| Itaú | `itau` | ✅ |
+| Banco Estado (CuentaRUT) | `bestado` | ✅ |
+| Tarjeta Cencosud | `cencosud` | ✅ |
+| Banco Security | `bancosecurity` | ✅ |
+
+**¿Tu banco no está?** → [Agrégalo](CONTRIBUTING.md) — necesitas una cuenta real para probarlo.
+
+---
+
+## ⚡ Instalación
+
+```bash
+git clone https://github.com/bcortezf/open-banking-chile.git
+cd open-banking-chile
+npm install && npm run build
+cp .env.example .env   # edita con tus credenciales
 ```
 
-Los campos `movements` y `balance` en `ScrapeResult` se mantienen como `@deprecated` para compatibilidad temporal.
-
-## Migración v1 → v2
-
-**v2.0.0 introduce un cambio breaking en la interfaz `BankMovement`:**
-
-El campo `source` ahora es **obligatorio** e indica el origen del movimiento. Si construyes objetos `BankMovement` manualmente, agrega `source: "account"`. Si solo consumes resultados del scraper, no hay cambios necesarios.
-
-También en esta versión: utilidades compartidas (`parseChileanAmount`, `normalizeDate`, `deduplicateMovements`, etc.) disponibles como exports desde `open-banking-chile/utils`.
-
-## Bancos soportados
-
-| Banco                             | ID           | Estado       |
-| --------------------------------- | ------------ | ------------ |
-| Banco Falabella (cuenta + CMR TC) | `falabella`  | ✅ Funcional |
-| Banco BICE                        | `bice`       | ✅ Funcional |
-| Banco Santander                   | `santander`  | ✅ Funcional |
-| Banco Edwards                     | `edwards`    | ✅ Funcional |
-| Scotiabank                        | `scotiabank` | ✅ Funcional |
-| Banco de Chile                    | `bchile`     | ✅ Funcional |
-| BCI                               | `bci`        | ✅ Funcional |
-| Itaú                              | `itau`       | ✅ Funcional |
-| Banco Estado (CuentaRUT)          | `bestado`    | ✅ Funcional |
-| Tarjeta Cencosud                  | `cencosud`   | ✅ Funcional |
-
-**¿Tu banco no está?** → [Contribuir](#contribuir)
-
-## Requisitos
-
-- **Node.js** >= 18
-- **Google Chrome** o **Chromium**
+**Requisitos:** Node.js >= 18, Google Chrome o Chromium.
 
 ```bash
 # Instalar Chrome — Ubuntu/Debian
@@ -72,112 +68,57 @@ sudo apt update && sudo apt install -y google-chrome-stable
 brew install --cask google-chrome
 ```
 
-## Instalación
+> 💡 El CLI carga automáticamente las variables del `.env`, no necesitas hacer `source .env`.
 
-```bash
-# Desde GitHub
-npm install github:kaihv/open-banking-chile
+---
 
-# O clonar el repo
-git clone https://github.com/kaihv/open-banking-chile.git
-cd open-banking-chile
-npm install
-npm run build
-```
-
-## Uso
+## 🚀 Uso
 
 ### CLI
 
-Configura tu archivo `.env` con tus credenciales:
+Configura tu `.env` con tus credenciales siguiendo el `.env.example`, luego:
 
 ```bash
-# Banco Falabella
-FALABELLA_RUT=12345678-9
-FALABELLA_PASS=tu_clave
-
-# Banco BICE
-BICE_RUT=12345678-9
-BICE_PASS=tu_clave
-## Opcional:
-BICE_MONTHS=1
-
-# Banco Santander
-SANTANDER_RUT=12345678-9
-SANTANDER_PASS=tu_clave
-
-# Banco de Chile
-BANCOCHILE_RUT=12345678-9
-BANCOCHILE_PASS=tu_clave
-
-# Banco Edwards
-EDWARDS_RUT=12345678-9
-EDWARDS_PASS=tu_clave
-
-
-# Itaú
-ITAU_RUT=12345678-9
-ITAU_PASS=tu_clave
-
-# Banco Estado
-BESTADO_RUT=12345678-9
-BESTADO_PASS=tu_clave
-
-# Tarjeta Cencosud
-CENCOSUD_RUT=12345678-9
-CENCOSUD_PASS=tu_clave
-```
-
-Ejecuta la librería con el comando `npx`, `dotenv` incluirá automáticamente las variables de entorno.
-
-```bash
-
 # Consultar banco
-npx open-banking-chile --bank falabella --pretty
-npx open-banking-chile --bank santander --pretty
-npx open-banking-chile --bank bchile --pretty
-npx open-banking-chile --bank edwards --pretty
-npx open-banking-chile --bank itau --pretty
-npx open-banking-chile --bank bestado --pretty
-npx open-banking-chile --bank cencosud --pretty
+node dist/cli.js --bank falabella --pretty
 
-# Solo movimientos
-npx open-banking-chile --bank falabella --movements | jq .
+# Solo movimientos (fácil de pipear a jq)
+node dist/cli.js --bank falabella --movements | jq .
 
 # Listar bancos disponibles
-npx open-banking-chile --list
+node dist/cli.js --list
+
+# Ayuda completa
+node dist/cli.js --help
 
 # Con screenshots para debugging
-npx open-banking-chile --bank falabella --screenshots --pretty
+node dist/cli.js --bank falabella --screenshots --pretty
+
+# Modo headful (Chrome visible, para debug visual)
+node dist/cli.js --bank falabella --headful --pretty
 ```
 
 **Opciones CLI:**
 
-| Flag                | Descripción                                                     |
-| ------------------- | --------------------------------------------------------------- |
-| `--bank <id>`       | Banco a consultar (requerido)                                   |
-| `--list`            | Listar bancos disponibles                                       |
-| `--pretty`          | JSON formateado                                                 |
-| `--movements`       | Solo array de movimientos                                       |
-| `--screenshots`     | Guardar screenshots locales en `./screenshots/`                 |
-| `--headful`         | Chrome visible (debugging). **BancoEstado siempre usa headful** |
-| `--owner <T\|A\|B>` | Filtro Titular/Adicional para TC (default: B = todos)           |
+| Flag | Descripción |
+|------|-------------|
+| `--bank <id>` | Banco a consultar (requerido) |
+| `--list` | Listar bancos disponibles |
+| `--pretty` | JSON formateado con indentación |
+| `--movements` | Solo array de movimientos (sin metadata) |
+| `--screenshots` | Guardar screenshots en `./screenshots/` |
+| `--headful` | Chrome visible (debugging). **BancoEstado siempre usa headful** |
+| `--owner <T\|A\|B>` | Filtro Titular/Adicional para TC (default: B = todos) |
+| `--empresa` | [BCHILE] Usar portal empresas |
+| `--bankQuery <RUT>` | [BCHILE] RUT empresa a consultar |
 
 ### Como librería
 
 ```typescript
-import { banks, getBank } from "open-banking-chile";
+import { getBank } from "open-banking-chile";
 
-// Opción 1: por ID
 const falabella = getBank("falabella");
 const result = await falabella!.scrape({
-  rut: "12345678-9",
-  password: "mi_clave",
-});
-
-// Opción 2: import directo
-import { falabella } from "open-banking-chile";
-const result = await falabella.scrape({
   rut: "12345678-9",
   password: "mi_clave",
 });
@@ -185,7 +126,7 @@ const result = await falabella.scrape({
 if (result.success) {
   console.log(`Banco: ${result.bank}`);
 
-  // Cuenta corriente
+  // Cuentas
   for (const account of result.accounts ?? []) {
     console.log(`Saldo: $${account.balance?.toLocaleString("es-CL")}`);
     for (const m of account.movements) {
@@ -205,7 +146,7 @@ if (result.success) {
 }
 ```
 
-### Output
+### Output de ejemplo
 
 ```json
 {
@@ -227,30 +168,27 @@ if (result.success) {
   ],
   "creditCards": [
     {
-      "label": "CMR Mastercard ****1234",
-      "national": { "used": 50000, "available": 950000, "total": 1000000 },
-      "nextBillingDate": "19-04-2026",
-      "nextDueDate": "05-05-2026",
-      "periodExpenses": 15990,
+      "label": "Visa Signature ****4585",
+      "national": { "used": 2227324, "available": 3872676, "total": 6100000 },
+      "international": { "used": 0, "available": 3001.24, "total": 3000, "currency": "USD" },
+      "nextBillingDate": "21 de agosto",
+      "billingPeriod": "Junio 2026",
       "movements": [
         {
-          "date": "07-03-2026",
-          "description": "COMPRA COMERCIO",
-          "amount": -15990,
+          "date": "23-07-2026",
+          "description": "DISNEY PLUS COMPRAS INT.VI",
+          "amount": -17.14,
           "balance": 0,
           "source": "credit_card_unbilled",
-          "card": "****1234",
-          "owner": "titular",
-          "installments": "01/03",
-          "totalAmount": 47970
+          "installments": "01/01"
         },
         {
-          "date": "01-03-2026",
-          "description": "PAGO TARJETA DE CRÉDITO",
-          "amount": 70000,
+          "date": "30-06-2026",
+          "description": "PAGO PESOS TEF PAGO NORMAL",
+          "amount": 2500000,
           "balance": 0,
-          "source": "credit_card_billed",
-          "card": "****1234"
+          "source": "credit_card_unbilled",
+          "installments": "01/01"
         }
       ]
     }
@@ -260,172 +198,161 @@ if (result.success) {
 
 ### Campo `source`
 
-Cada movimiento incluye un campo `source` que indica su origen:
+Cada movimiento incluye `source` indicando su origen:
 
-| Valor                  | Descripción                       |
-| ---------------------- | --------------------------------- |
-| `account`              | Cuenta corriente o vista          |
+| Valor | Descripción |
+|-------|-------------|
+| `account` | Cuenta corriente o vista |
 | `credit_card_unbilled` | Tarjeta de crédito — por facturar |
-| `credit_card_billed`   | Tarjeta de crédito — facturado    |
+| `credit_card_billed` | Tarjeta de crédito — facturado |
 
-Campos opcionales en `BankMovement`:
+**Campos opcionales en `BankMovement`:**
 
-| Campo          | Descripción                                                                 |
-| -------------- | --------------------------------------------------------------------------- |
-| `owner`        | `"titular"` o `"adicional"` (Falabella CMR)                                 |
-| `card`         | Máscara de la tarjeta, ej: `"****8335"` (BChile, Falabella)                 |
-| `installments` | Cuotas en formato `NN/NN`, ej: `"02/06"` = cuota 2 de 6                     |
-| `totalAmount`  | Monto total de la compra cuando es en cuotas (Falabella)                    |
+| Campo | Descripción |
+|-------|-------------|
+| `owner` | `"titular"` o `"adicional"` |
+| `card` | Máscara de la tarjeta, ej: `"****8335"` |
+| `installments` | Cuotas formato `NN/NN`, ej: `"02/06"` |
+| `totalAmount` | Monto total de la compra en cuotas |
 
-## Seguridad
+---
 
-- **Tus credenciales nunca salen de tu máquina**. Todo corre 100% local.
-- No hay analytics, telemetría, ni tracking.
-- Las credenciales se pasan por env vars, nunca se guardan en disco.
-- Los screenshots de debug pueden contener datos sensibles — no los compartas.
-- Lee [SECURITY.md](SECURITY.md) para más detalles.
-
-## Arquitectura
-
-El proyecto sigue una **arquitectura limpia en tres capas**, separando responsabilidades para facilitar la reutilización y la adición de nuevos bancos:
+## 🏗️ Estructura del proyecto
 
 ```
 src/
-  index.ts                    — Registro de bancos, getBank(), listBanks()
-  types.ts                    — Interfaces: BankScraper, BankMovement, ScrapeResult
-  utils.ts                    — Utilidades compartidas (parsing, fechas, dedup)
-  cli.ts                      — CLI entry point
-  infrastructure/
-    browser.ts                — Gestión centralizada del browser (launch, sesión, cleanup)
-    scraper-runner.ts         — Pipeline de ejecución (credenciales → browser → scrape → logout → resultado)
-  actions/
-    login.ts                  — Login genérico (RUT, password, submit, detección de errores)
-    navigation.ts             — Navegación DOM (click por texto, sidebars, banners)
-    extraction.ts             — Extracción de movimientos desde tablas HTML
-    pagination.ts             — Iteración multi-página (Siguiente, Ver más)
-    credit-card.ts            — Extracción de movimientos de tarjeta de crédito
-    balance.ts                — Extracción de saldo
-    two-factor.ts             — Detección y espera de 2FA
+  index.ts              — Registro de bancos, getBank(), listBanks()
+  types.ts              — Interfaces: BankScraper, BankMovement, ScrapeResult
+  utils.ts              — Utilidades compartidas (ver abajo)
+  cli.ts                — CLI entry point
   banks/
-    falabella.ts              — Banco Falabella + CMR (cuenta + tarjeta de crédito)
-    bestado.ts                — Banco Estado (CuentaRUT, requiere headful)
-    bchile.ts                 — Banco de Chile
-    bci.ts                    — BCI (iframes + BCI Pass)
-    bice.ts                   — Banco BICE
-    cencosud.ts               — Tarjeta Cencosud (hCaptcha intermitente, requiere --headful si aparece)
-    edwards.ts                — Banco Edwards
-    itau.ts                   — Itaú
-    santander.ts              — Banco Santander
-    scotiabank.ts             — Scotiabank Chile
+    falabella.ts        — Banco Falabella + CMR
+    bestado.ts          — Banco Estado (CuentaRUT, requiere headful)
+    bchile.ts           — Banco de Chile (personas + empresas, REST API)
+    bci.ts              — BCI (iframes)
+    bice.ts             — Banco BICE
+    cencosud.ts         — Tarjeta Cencosud (hCaptcha ocasional)
+    edwards.ts          — Banco Edwards
+    itau.ts             — Itaú
+    santander.ts        — Banco Santander
+    scotiabank.ts       — Scotiabank Chile
+    bancosecurity.ts    — Banco Security
 ```
-
-### Capas
-
-**Infrastructure** — Gestión del ciclo de vida del browser. `launchBrowser()` centraliza la configuración de Chrome (anti-detección, user agent, modo headful/headless). `runScraper()` envuelve toda la ejecución: valida credenciales, abre el browser, ejecuta el scraper del banco, hace logout y cierra el browser. Los errores se capturan y retornan como `ScrapeResult`.
-
-**Actions** — Operaciones reutilizables e independientes del banco. Cada banco compone estas acciones en vez de reimplementarlas. Por ejemplo, `fillRut()` soporta múltiples formatos de RUT y funciona tanto en `Page` como en iframes; `paginateAndExtract()` navega automáticamente por páginas acumulando movimientos; `detect2FA()` detecta segundo factor por keywords configurables.
-
-**Banks** — Orquestación específica de cada banco. Solo contienen la lógica particular: selectores CSS propios, flujo de navegación, y configuración de 2FA. Usan `runScraper()` como wrapper y componen acciones del layer anterior.
 
 ### Utilidades compartidas (`utils.ts`)
 
-Funciones comunes usadas por scrapers y acciones:
+| Función | Descripción |
+|---------|-------------|
+| `parseChileanAmount(text)` | Parsea montos en formato chileno ($1.234.567) a número |
+| `normalizeDate(raw)` | Normaliza fechas a DD-MM-YYYY |
+| `normalizeOwner(raw)` | Normaliza owner a `"titular"` o `"adicional"` |
+| `normalizeInstallments(raw)` | Normaliza cuotas a formato NN/NN |
+| `deduplicateMovements(movements)` | Elimina movimientos duplicados |
+| `logout(page, debugLog)` | Cierra sesión automáticamente |
+| `formatRut(rut)` | Formatea RUT (12345678-9 → 12.345.678-9) |
+| `findChrome()` | Busca Chrome/Chromium en el sistema |
+| `closePopups(page)` | Cierra popups y modales genéricos |
+| `delay(ms)` | Espera N milisegundos |
+| `saveScreenshot(page, name, enabled, debugLog)` | Guarda screenshot si está habilitado |
 
-| Función                                         | Descripción                                                            |
-| ----------------------------------------------- | ---------------------------------------------------------------------- |
-| `parseChileanAmount(text)`                      | Parsea montos en formato chileno ($1.234.567) a número                 |
-| `normalizeDate(raw)`                            | Normaliza fechas a DD-MM-YYYY (soporta dd/mm/yyyy, "9 mar 2026", etc.) |
-| `normalizeOwner(raw)`                           | Normaliza owner a `"titular"` o `"adicional"`                          |
-| `normalizeInstallments(raw)`                    | Normaliza cuotas a formato NN/NN (ej: "1/3" → "01/03")                 |
-| `deduplicateMovements(movements)`               | Elimina movimientos duplicados por fecha+descripción+monto+source      |
-| `logout(page, debugLog)`                        | Cierra sesión buscando botones comunes (cerrar sesión, salir, etc.)    |
-| `formatRut(rut)`                                | Formatea RUT (12345678-9 → 12.345.678-9)                               |
-| `findChrome()`                                  | Busca Chrome/Chromium en el sistema                                    |
-| `closePopups(page)`                             | Cierra popups y modales genéricos                                      |
-| `delay(ms)`                                     | Espera N milisegundos                                                  |
-| `saveScreenshot(page, name, enabled, debugLog)` | Guarda screenshot si está habilitado                                   |
+---
 
-## Contribuir
+## 🤖 Revisión IA de PRs
 
-Queremos cubrir **todos los bancos de Chile**. Si tienes cuenta en un banco que falta:
+Cada Pull Request es analizado automáticamente por **DeepSeek** para detectar:
 
-1. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para la guía paso a paso
-2. Crea `src/banks/<tu-banco>.ts` implementando `BankScraper`
-3. Usa `runScraper()` de `infrastructure/` y compone acciones de `actions/` (login, extracción, paginación, etc.)
-4. Usa las utilidades compartidas de `utils.ts` (parsing, fechas, dedup, logout)
-5. Regístralo en `src/index.ts`
-6. Abre un PR
+| Amenaza | Detección |
+|---------|-----------|
+| 🔑 Credenciales hardcodeadas | ✅ |
+| 🐚 Command injection | ✅ |
+| 🕵️ Código ofuscado / malware | ✅ |
+| 🌐 Exfiltración de datos | ✅ |
 
-```typescript
-// La interfaz es simple:
-interface BankScraper {
-  id: string; // "mi-banco"
-  name: string; // "Mi Banco Chile"
-  url: string; // "https://www.mibanco.cl"
-  scrape(options: ScraperOptions): Promise<ScrapeResult>;
-}
-```
+La IA **no reemplaza** las pruebas con cuentas reales. Solo es un filtro de seguridad automatizado.
 
-## Automatización (cron)
+---
+
+## 🔒 Seguridad
+
+- **Tus credenciales nunca salen de tu máquina.** Todo corre 100% local.
+- No hay analytics, telemetría, ni tracking.
+- Las credenciales se pasan por env vars, nunca se guardan en disco.
+- Los screenshots de debug pueden contener datos sensibles — no los compartas.
+- Cada PR es analizado por IA (DeepSeek) para detectar código malicioso.
+
+---
+
+## 🔄 Automatización (cron)
 
 ```bash
-# Ejemplo: sincronizar Falabella diariamente a las 7 AM
-0 7 * * * source /home/user/.env && node /path/to/dist/cli.js --bank falabella >> /var/log/bank-sync.log 2>&1
+# Sincronizar Falabella diariamente a las 7 AM
+0 7 * * * cd ~/open-banking-chile && node dist/cli.js --bank falabella --pretty >> /var/log/bank-sync.log 2>&1
 
-# Ejemplo: sincronizar BICE diariamente y con 3 meses históricos
-0 7 * * * source /home/user/.env && BICE_MONTHS=3 node /path/to/dist/cli.js --bank bice >> /var/log/bank-sync.log 2>&1
+# Sincronizar BICE con 3 meses históricos
+0 7 * * * cd ~/open-banking-chile && BICE_MONTHS=3 node dist/cli.js --bank bice >> /var/log/bank-sync.log 2>&1
+
+# Sincronizar todos los bancos (usando el script)
+0 8 * * * cd ~/open-banking-chile && bash finapp/scripts/daily.sh >> data/sync.log 2>&1
 ```
 
-## Troubleshooting
+---
 
-| Problema              | Solución                                                                                       |
-| --------------------- | ---------------------------------------------------------------------------------------------- |
-| Chrome no encontrado  | Instala Chrome o usa `CHROME_PATH=/ruta/chrome`                                                |
-| 2FA / Clave dinámica  | Si aparece, apruébalo manualmente en tu banco y vuelve a intentar                              |
-| 0 movimientos         | Usa `--screenshots --pretty` y revisa el debug log                                             |
-| Login falla           | Verifica RUT y clave, prueba con `--headful`                                                   |
-| BancoEstado bloqueado | BancoEstado bloquea headless (TLS fingerprinting). Siempre abre Chrome visible. Ver nota abajo |
-| Cencosud pide CAPTCHA | Ocurre ocasionalmente. En headless retorna error — reintenta con `--headful` para resolverlo manualmente |
+## ⚠️ Troubleshooting
+
+| Problema | Solución |
+|----------|----------|
+| Chrome no encontrado | Instala Chrome o usa `CHROME_PATH=/ruta/chrome` |
+| 2FA / Clave dinámica | Apruébalo manualmente en tu banco y vuelve a intentar |
+| 0 movimientos | Usa `--screenshots --pretty` y revisa el debug log |
+| Login falla | Verifica RUT y clave, prueba con `--headful` |
+| BancoEstado bloqueado | Usa `xvfb-run` en servidores sin GUI (ver abajo) |
+| Cencosud pide CAPTCHA | Reintenta con `--headful` para resolverlo manualmente |
 
 ### BancoEstado y modo headless
 
-BancoEstado detecta navegadores headless a nivel de red (TLS fingerprinting), no solo por JavaScript. Ni `puppeteer-extra-plugin-stealth` ni `rebrowser-puppeteer-core` logran evadir esta detección. El scraper siempre corre en modo headful (Chrome visible).
+BancoEstado detecta navegadores headless a nivel de red (TLS fingerprinting). El scraper siempre corre en modo headful.
 
-### Tarjeta Cencosud y CAPTCHA
-
-Tarjeta Cencosud presenta ocasionalmente un hCaptcha en el login. No siempre aparece.
-
-- **Headless** (modo por defecto): el scraper detecta el CAPTCHA y retorna un error claro.
-- **Headful** (`--headful`): el scraper pausa y espera a que resuelvas el CAPTCHA manualmente en el navegador visible, luego continúa.
-
-```bash
-node dist/cli.js --bank cencosud --headful --pretty
-```
-
-El tiempo máximo de espera es 180 segundos (configurable con `CENCOSUD_CAPTCHA_TIMEOUT=segundos`).
-
-**En servidores Linux sin GUI**, usa Xvfb (display virtual):
+**En servidores Linux sin GUI**, usa Xvfb:
 
 ```bash
 # Instalar
 sudo apt install xvfb
 
-# Correr con display virtual
+# Correr
 xvfb-run node dist/cli.js --bank bestado --pretty
-
-# O como parte de tu app
-xvfb-run node tu-app.js
-```
-
-**En Docker:**
-
-```dockerfile
-RUN apt-get update && apt-get install -y xvfb google-chrome-stable
-CMD ["xvfb-run", "node", "server.js"]
 ```
 
 **En Mac/Windows** no necesitas nada extra — Chrome se abre y cierra automáticamente.
 
-## License
+### Tarjeta Cencosud y CAPTCHA
 
-MIT — Hecho en Chile 🇨🇱
+Cencosud presenta ocasionalmente un hCaptcha en el login:
+
+- **Headless** (default): detecta el CAPTCHA y retorna error claro.
+- **Headful** (`--headful`): pausa y espera a que resuelvas el CAPTCHA manualmente.
+
+```bash
+node dist/cli.js --bank cencosud --headful --pretty
+```
+
+Timeout configurable: `CENCOSUD_CAPTCHA_TIMEOUT=segundos`.
+
+---
+
+## 🤝 Contribuir
+
+Queremos cubrir **todos los bancos de Chile**. Si tienes cuenta en un banco que falta:
+
+1. Lee [CONTRIBUTING.md](CONTRIBUTING.md) para la guía paso a paso
+2. Crea `src/banks/<tu-banco>.ts` implementando `BankScraper`
+3. Usa las utilidades compartidas de `utils.ts`
+4. Regístralo en `src/index.ts`
+5. Abre un PR — necesitas 2 revisores con cuenta en ese banco
+
+---
+
+## 📄 Licencia
+
+MIT — manteniendo el copyright original del proyecto open-banking-chile.
+
+Hecho en Chile 🇨🇱

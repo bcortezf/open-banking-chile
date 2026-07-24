@@ -29,22 +29,8 @@ export interface BankMovement {
   source: MovementSource;
   /** Titular o adicional de la tarjeta */
   owner?: CardOwner;
-  /** Identificador de la tarjeta (ej: "****8335") — útil cuando hay múltiples tarjetas */
-  card?: string;
   /** Cuotas (ej: "01/01", "02/06") */
   installments?: string;
-  /** Monto total de la compra (distinto de amount cuando es en cuotas) */
-  totalAmount?: number;
-}
-
-/** Saldo y movimientos de una cuenta bancaria */
-export interface AccountBalance {
-  /** Identificador de la cuenta (ej: "Cuenta Corriente ****2706") */
-  label?: string;
-  /** Saldo actual */
-  balance?: number;
-  /** Movimientos de la cuenta */
-  movements: BankMovement[];
 }
 
 /** Saldo de una tarjeta de crédito */
@@ -66,25 +52,8 @@ export interface CreditCardBalance {
   };
   /** Periodo de facturación actual (ej: "Febrero 2026") */
   billingPeriod?: string;
-  /** Próxima fecha de facturación (formato dd-mm-yyyy) */
+  /** Próxima fecha de facturación (ej: "19 de marzo") */
   nextBillingDate?: string;
-  /** Próxima fecha de vencimiento de pago (formato dd-mm-yyyy) */
-  nextDueDate?: string;
-  /** Gastos del período actual (no facturados) */
-  periodExpenses?: number;
-  /** Datos del último estado de cuenta facturado */
-  lastStatement?: {
-    /** Fecha de facturación dd-mm-yyyy */
-    billingDate: string;
-    /** Monto total facturado */
-    billedAmount: number;
-    /** Fecha de vencimiento dd-mm-yyyy */
-    dueDate: string;
-    /** Pago mínimo */
-    minimumPayment?: number;
-  };
-  /** Movimientos de la tarjeta */
-  movements?: BankMovement[];
 }
 
 /** Resultado del scraping */
@@ -93,14 +62,12 @@ export interface ScrapeResult {
   success: boolean;
   /** Nombre del banco */
   bank: string;
-  /** Cuentas bancarias con sus movimientos */
-  accounts?: AccountBalance[];
+  /** Lista de movimientos encontrados */
+  movements: BankMovement[];
+  /** Saldo actual de la cuenta */
+  balance?: number;
   /** Saldos de tarjetas de crédito */
   creditCards?: CreditCardBalance[];
-  /** @deprecated Use accounts[].movements instead. Kept for compatibility during migration. */
-  movements?: BankMovement[];
-  /** @deprecated Use accounts[].balance instead. Kept for compatibility during migration. */
-  balance?: number;
   /** Mensaje de error si success = false */
   error?: string;
   /** Screenshot en base64 (para debugging) */
@@ -127,10 +94,10 @@ export interface ScraperOptions extends BankCredentials {
   headful?: boolean;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */
   owner?: "T" | "A" | "B";
-  /** Callback de progreso para mostrar estado al usuario */
-  onProgress?: (step: string) => void;
-  /** Callback invocado en cada línea de debug en tiempo real */
-  onDebug?: (line: string) => void;
+  /** [BCHILE Empresas] RUT de la empresa a consultar (ej: "77123456-1"). Si se especifica, valida que la empresa esté seleccionada. Si no, usa la empresa actualmente seleccionada. */
+  bankQuery?: string;
+  /** [BCHILE] Usar portal empresas (login.portalempresas). Requiere bankQuery o usa la empresa seleccionada. */
+  empresa?: boolean;
 }
 
 /** Interfaz que debe implementar cada banco */

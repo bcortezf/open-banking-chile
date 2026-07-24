@@ -1,8 +1,28 @@
 #!/usr/bin/env node
-import { config } from 'dotenv';
+
+import { readFileSync, existsSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+// Auto-load .env file
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const envPath = resolve(__dirname, "..", ".env");
+if (existsSync(envPath)) {
+  const lines = readFileSync(envPath, "utf-8").split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+    if (!process.env[key]) {
+      process.env[key] = val;
+    }
+  }
+}
+
 import { banks, listBanks, getBank } from "./index.js";
-import { Spinner } from "./utils.js";
-config();
 
 async function main() {
   const args = process.argv.slice(2);
@@ -23,14 +43,16 @@ Bancos disponibles:
 ${bankList}
 
 Opciones:
-  --bank <id>      Banco a consultar (requerido)
-  --list           Listar bancos disponibles
-  --screenshots    Guardar screenshots en ./screenshots/
-  --headful        Abrir Chrome visible (para debugging)
-  --pretty         Formatear JSON con indentación
-  --movements      Solo imprimir movimientos (sin metadata)
-  --owner <T|A|B>  Filtro Titular/Adicional para TC (default: B = todos)
-  --help, -h       Mostrar esta ayuda
+  --bank <id>         Banco a consultar (requerido)
+  --list              Listar bancos disponibles
+  --screenshots       Guardar screenshots en ./screenshots/
+  --headful           Abrir Chrome visible (para debugging)
+  --pretty            Formatear JSON con indentación
+  --movements         Solo imprimir movimientos (sin metadata)
+  --owner <T|A|B>     Filtro Titular/Adicional para TC (default: B = todos)
+  --bankQuery <RUT>   [BCHILE Empresas] RUT empresa a consultar (ej: 77123456-1). Sin valor usa la empresa seleccionada.
+  --empresa           [BCHILE] Usar portal empresas (requiere --bankQuery o usa empresa seleccionada)
+  --help, -h          Mostrar esta ayuda
 
 Variables de entorno:
   <BANCO>_RUT      Tu RUT (ej: FALABELLA_RUT=12345678-9)
@@ -40,6 +62,9 @@ Variables de entorno:
 Ejemplos:
   # Banco Falabella
   FALABELLA_RUT=12345678-9 FALABELLA_PASS=miclave open-banking-chile --bank falabella --pretty
+
+  # Banco Chile Empresas (empresa específica por RUT)
+  BCHILE_RUT=12345678-9 BCHILE_PASS=miclave open-banking-chile --bank bchile --empresa --bankQuery=77123456-1 --pretty
 
   # Listar bancos disponibles
   open-banking-chile --list
@@ -90,9 +115,6 @@ Ejemplos:
   const rut = process.env[`${prefix}_RUT`];
   const password = process.env[`${prefix}_PASS`];
 
-  const isTTY = process.stderr.isTTY;
-  const spinner = new Spinner();
-
   if (!rut || !password) {
     console.error(
       `Error: Se requieren las variables ${prefix}_RUT y ${prefix}_PASS\n` +
@@ -114,11 +136,15 @@ Ejemplos:
   const ownerVal = ownerIdx >= 0 ? args[ownerIdx + 1]?.toUpperCase() : undefined;
   const owner = ownerVal === "T" || ownerVal === "A" || ownerVal === "B" ? ownerVal : undefined;
 
-  if (isTTY) {
-    spinner.start(`Conectando con ${bank.name}...`);
-  } else {
-    console.error(`Consultando banco: ${bank.name} (${bankId})...`);
+  // Parse --empresa and --bankQuery flags (BCHILE Empresas)
+  const empresaMode = flags.has("--empresa");
+  let bankQuery: string | undefined;
+  const bankQueryArg = args.find((a) => a === "--bankQuery" || a.startsWith("--bankQuery="));
+  if (bankQueryArg) {
+    const val = bankQueryArg.includes("=") ? bankQueryArg.split("=")[1] : args[args.indexOf(bankQueryArg) + 1];
+    bankQuery = val?.trim() || undefined;
   }
+  const useEmpresa = empresaMode || !!bankQuery;
 
   const result = await bank.scrape({
     rut,
@@ -127,12 +153,11 @@ Ejemplos:
     saveScreenshots: flags.has("--screenshots"),
     headful: flags.has("--headful"),
     ...(owner && { owner }),
-    onProgress: isTTY ? (step) => spinner.update(step) : undefined,
+    ...(useEmpresa && { empresa: true, bankQuery }),
   });
 
   if (!result.success) {
-    if (isTTY) spinner.fail(result.error || "Error desconocido");
-    else console.error(`Error: ${result.error}`);
+    console.error(`Error: ${result.error}`);
     if (result.debug) {
       console.error("\nDebug log:");
       console.error(result.debug);
@@ -140,19 +165,10 @@ Ejemplos:
     process.exit(1);
   }
 
-  if (isTTY) {
-    const accountCount = result.accounts?.reduce((sum, a) => sum + a.movements.length, 0) ?? 0;
-    const cardCount = result.creditCards?.reduce((sum, c) => sum + (c.movements?.length ?? 0), 0) ?? 0;
-    const count = accountCount + cardCount;
-    spinner.stop(`${bank.name} — ${count} movimiento${count !== 1 ? "s" : ""} obtenido${count !== 1 ? "s" : ""}`);
-  }
-
   const indent = flags.has("--pretty") ? 2 : undefined;
 
   if (flags.has("--movements")) {
-    const accountMovements = result.accounts?.flatMap((a) => a.movements) ?? [];
-    const cardMovements = result.creditCards?.flatMap((c) => c.movements ?? []) ?? [];
-    console.log(JSON.stringify([...accountMovements, ...cardMovements], null, indent));
+    console.log(JSON.stringify(result.movements, null, indent));
   } else {
     const { screenshot: _, ...output } = result;
     console.log(JSON.stringify(output, null, indent));
