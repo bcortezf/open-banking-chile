@@ -64,19 +64,33 @@ def static_analysis(diff_text: str, file_path: str) -> list[dict]:
 
 def get_pr_diff() -> str:
     """Get the full diff of the PR."""
+    base_ref = os.environ.get('GITHUB_BASE_REF', 'main')
+    # Try GitHub Actions merge commit first, then fallback to git diff
     result = subprocess.run(
-        ["git", "diff", f"origin/{os.environ.get('GITHUB_BASE_REF', 'main')}...HEAD"],
+        ["git", "diff", f"origin/{base_ref}...HEAD"],
         capture_output=True, text=True, timeout=30,
     )
+    if result.returncode != 0 or not result.stdout.strip():
+        # Fallback: diff against first parent (merge commit)
+        result = subprocess.run(
+            ["git", "diff", "HEAD~1...HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
     return result.stdout
 
 
 def get_changed_files() -> list[str]:
     """Get list of changed files in the PR."""
+    base_ref = os.environ.get('GITHUB_BASE_REF', 'main')
     result = subprocess.run(
-        ["git", "diff", "--name-only", f"origin/{os.environ.get('GITHUB_BASE_REF', 'main')}...HEAD"],
+        ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
         capture_output=True, text=True, timeout=15,
     )
+    if result.returncode != 0 or not result.stdout.strip():
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1...HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
     return [f.strip() for f in result.stdout.split("\n") if f.strip()]
 
 
