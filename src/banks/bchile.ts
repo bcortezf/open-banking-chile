@@ -224,6 +224,9 @@ async function detectLoginError(page: Page): Promise<string | null> {
       "suspendida",
       "sesión activa",
       "ya tiene una sesión",
+      "reactivar",
+      "clave bloqueada",
+      "clave suspendida",
     ];
 
     for (const text of errorTexts) {
@@ -768,14 +771,14 @@ function empresaMatchesRut(empresa: ApiEmpresa, rutQuery: string): boolean {
 /** Valida que la empresa exista. Retorna la empresa (seleccionada o no). */
 function findEmpresaByQuery(
   empresas: ApiEmpresa[],
-  bankQuery: string,
+  companyRut: string,
   debugLog: string[]
 ): { ok: boolean; empresa?: ApiEmpresa; error?: string } {
-  const empresa = empresas.find((e) => empresaMatchesRut(e, bankQuery));
+  const empresa = empresas.find((e) => empresaMatchesRut(e, companyRut));
   if (!empresa) {
     return {
       ok: false,
-      error: `Empresa RUT ${bankQuery} no encontrada en el listado. Empresas disponibles: ${empresas.map((e) => e.rutEmpresa).join(", ")}`,
+      error: `Empresa RUT ${companyRut} no encontrada en el listado. Empresas disponibles: ${empresas.map((e) => e.rutEmpresa).join(", ")}`,
     };
   }
   return { ok: true, empresa };
@@ -1252,7 +1255,7 @@ async function scrapeEmpresa(
   page: Page,
   rut: string,
   password: string,
-  bankQuery: string | null,
+  companyRut: string | null,
   debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
   doScreenshots: boolean
@@ -1284,8 +1287,8 @@ async function scrapeEmpresa(
   }
 
   let selectedEmpresa: ApiEmpresa;
-  if (bankQuery) {
-    const found = findEmpresaByQuery(empresas, bankQuery, debugLog);
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
     if (!found.ok || !found.empresa) {
       return {
         success: false, bank, movements: [],
@@ -1295,7 +1298,7 @@ async function scrapeEmpresa(
     const targetEmpresa = found.empresa;
     if (!targetEmpresa.seleccionada) {
       debugLog.push(`  Empresa ${targetEmpresa.nombreFantasia} no está seleccionada. Cambiando...`);
-      const changed = await cambiarEmpresaSeleccionada(page, empresas, bankQuery, debugLog);
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
       if (!changed) {
         return {
           success: false, bank, movements: [],
@@ -1304,7 +1307,7 @@ async function scrapeEmpresa(
         };
       }
       empresas = await getEmpresas(page);
-      const updated = empresas.find((e) => empresaMatchesRut(e, bankQuery));
+      const updated = empresas.find((e) => empresaMatchesRut(e, companyRut));
       selectedEmpresa = updated ?? targetEmpresa;
     } else {
       selectedEmpresa = targetEmpresa;
@@ -1315,7 +1318,7 @@ async function scrapeEmpresa(
     if (!sel) {
       return {
         success: false, bank, movements: [],
-        error: "No hay empresa seleccionada. Especifique --bankQuery con el RUT de la empresa a consultar.",
+        error: "No hay empresa seleccionada. Especifique --companyRut con el RUT de la empresa a consultar.",
         debug: debugLog.join("\n"),
       };
     }
@@ -1349,11 +1352,18 @@ async function scrapeEmpresa(
 // ─── Main scraper ────────────────────────────────────────────────
 
 async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
-  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful, scope, empresa, bankQuery } = options;
+  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful } = options;
   const bank = "bchile";
-  // Soporte dual: scope (nuevo) | empresa/bankQuery (deprecated)
-  const isEmpresa = scope?.type === "business" || empresa === true;
-  const empresaRut = scope?.companyRut || bankQuery;
+
+  // Normalizar scope: si usaron --empresa (deprecated), convertirlo a scope
+  let scope = options.scope;
+  if (!scope) {
+    if (options.empresa) {
+      scope = { type: "business", companyRut: options.bankQuery };
+    }
+  }
+
+  const isEmpresa = scope?.type === "business";
 
   if (!rut || !password) {
     return { success: false, bank, movements: [], error: "Debes proveer RUT y clave." };
@@ -1388,7 +1398,7 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
 
     // ─── Flujo Empresa ─────────────────────────────────────────────
     if (isEmpresa) {
-      return await scrapeEmpresa(page, rut, password, empresaRut ?? null, debugLog, doSave, !!doScreenshots);
+      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots);
     }
 
     // ─── Flujo Personas (existente) ─────────────────────────────────
