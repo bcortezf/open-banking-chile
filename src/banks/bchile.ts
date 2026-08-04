@@ -1349,7 +1349,227 @@ async function scrapeEmpresa(
   };
 }
 
+// ─── Acción: listar beneficiarios de la agenda TEF ────────────────
+
+/**
+ * Lista todos los beneficiarios (cuentas) de la agenda TEF de la empresa.
+ * Acción: --beneficiarios (scope business)
+ */
+async function listarBeneficiariosEmpresa(
+  page: Page,
+  rut: string,
+  password: string,
+  companyRut: string | null,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  await closePopups(page);
+
+  // Seleccionar empresa
+  debugLog.push("5. Seleccionando empresa...");
+  let empresas: ApiEmpresa[];
+  try {
+    empresas = await getEmpresas(page);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener listado de empresas: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
+    if (!found.ok || !found.empresa) {
+      return { success: false, bank, movements: [], error: found.error, debug: debugLog.join("\n") };
+    }
+    const targetEmpresa = found.empresa;
+    if (!targetEmpresa.seleccionada) {
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
+      if (!changed) {
+        return {
+          success: false, bank, movements: [],
+          error: `No se pudo cambiar a la empresa ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa}).`,
+          debug: debugLog.join("\n"),
+        };
+      }
+    }
+    debugLog.push(`  Empresa: ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa})`);
+  } else {
+    const sel = empresas.find((e) => e.seleccionada);
+    if (!sel) {
+      return {
+        success: false, bank, movements: [],
+        error: "No hay empresa seleccionada. Especifique --scope business:RUT.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    debugLog.push(`  Empresa: ${sel.nombreFantasia} (${sel.rutEmpresa})`);
+  }
+
+  // Consultar agenda TEF (misma API que usa Tickefy)
+  debugLog.push("6. Consultando agenda TEF...");
+  let beneficiarios: Array<Record<string, unknown>> = [];
+  try {
+    const data = await apiGetEmpresa<unknown>(page, "tef-agenda/agenda/filtro?favorito=0");
+    if (Array.isArray(data)) {
+      beneficiarios = data as Array<Record<string, unknown>>;
+    } else if (data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      if (Array.isArray(d.listaBeneficiarios)) {
+        beneficiarios = d.listaBeneficiarios as Array<Record<string, unknown>>;
+      } else if (Array.isArray(d.destinatarios)) {
+        beneficiarios = d.destinatarios as Array<Record<string, unknown>>;
+      } else {
+        for (const v of Object.values(d)) {
+          if (Array.isArray(v)) { beneficiarios = v as Array<Record<string, unknown>>; break; }
+        }
+      }
+    }
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener la agenda de beneficiarios: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  // Mapear a BankAccountInfo (reutilizar el tipo para consistencia)
+  const cuentasInfo: BankAccountInfo[] = beneficiarios.map((b) => ({
+    empresa: String(b.nombreRazonSocial ?? b.nombre ?? b.razonSocial ?? b.nombreBeneficiario ?? ""),
+    rutEmpresa: String(b.rutBeneficiario ?? b.rut ?? ""),
+    numero: String(b.numeroCuenta ?? b.cuenta ?? b.id ?? ""),
+    alias: String(b.alias ?? b.aliasCuenta ?? "") || undefined,
+    claseCuenta: String(b.tipoCuenta ?? b.tipo ?? b.descripcionTipoCuenta ?? "") || undefined,
+    moneda: "CLP",
+  })).filter((c) => c.numero);
+
+  debugLog.push(`7. Beneficiarios encontrados: ${cuentasInfo.length}`);
+  for (const c of cuentasInfo) {
+    debugLog.push(`  ${c.empresa} (${c.rutEmpresa}) — ${c.claseCuenta} ${c.numero}${c.alias ? ` (${c.alias})` : ""}`);
+  }
+
+  await doSave(page, "06-beneficiarios");
+  const screenshot = await page.screenshot({ encoding: "base64" }) as string;
+
+  return {
+    success: true, bank,
+    movements: [],
+    cuentas: cuentasInfo,
+    screenshot, debug: debugLog.join("\n"),
+  };
+}
+
 // ─── Acción: listar cuentas (sin movimientos) ─────────────────────
+
+/**
+ * Lista todas las cuentas del cliente (personas): corriente, vista,
+ * ahorro, línea de crédito, etc. con su saldo actual.
+ * Acción: --cuentas (scope personal)
+ */
+async function listarCuentasPersonal(
+  page: Page,
+  rut: string,
+  password: string,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await login(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  // Cerrar modal overlay post-login
+  try {
+    await page.waitForSelector("#modal_emergente_close, .cdk-overlay-container .btn-no-mas", { timeout: 8000 });
+    await page.evaluate(() => {
+      const closeBtn = document.querySelector("#modal_emergente_close") as HTMLElement | null;
+      if (closeBtn) { closeBtn.click(); return true; }
+      const noMasBtn = document.querySelector(".btn-no-mas") as HTMLElement | null;
+      if (noMasBtn) { noMasBtn.click(); return true; }
+      return false;
+    });
+    await delay(1500);
+  } catch {
+    // sin modal
+  }
+  await closePopups(page);
+
+  // Obtener productos (todas las cuentas) y saldos
+  debugLog.push("5. Fetching productos y saldos via API...");
+  let products: ApiProductsResponse;
+  let saldos: ApiAccountBalance[] = [];
+  try {
+    products = await apiGet<ApiProductsResponse>(page, "selectorproductos/selectorProductos/obtenerProductos?incluirTarjetas=true");
+    debugLog.push(`  Productos encontrados: ${products.productos.length}`);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener el listado de productos: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  try {
+    saldos = await apiGet<ApiAccountBalance[]>(page, "bff-pp-prod-ctas-saldos/productos/cuentas/saldos");
+    debugLog.push(`  Saldos obtenidos: ${saldos.length}`);
+  } catch (err) {
+    debugLog.push(`  No se pudieron obtener saldos: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Combinar productos con saldos
+  const cuentasInfo: BankAccountInfo[] = products.productos.map((p) => {
+    const saldo = saldos.find((s) => s.numero === p.numero || s.codProducto === p.codigo);
+    const tipo = p.tipo || saldo?.tipo || p.claseCuenta || "CUENTA";
+    const nombreTipo = tipo === "CUENTA_CORRIENTE" ? "Cuenta Corriente"
+      : tipo === "CUENTA_VISTA" ? "Cuenta Vista"
+      : tipo === "LINEA_CREDITO" || tipo === "LINEA_DE_CREDITO" ? "Línea de Crédito"
+      : tipo === "CUENTA_AHORRO" || tipo === "CUENTA_DE_AHORRO" ? "Cuenta de Ahorro"
+      : p.label || tipo;
+    return {
+      numero: p.numero,
+      mascara: p.mascara || `****${p.numero.slice(-4)}`,
+      alias: nombreTipo,
+      codigoProducto: p.codigo || p.codigoMoneda,
+      claseCuenta: p.claseCuenta || p.tipo,
+      moneda: p.codigoMoneda || saldo?.moneda || "CLP",
+      saldo: saldo?.disponible ?? (saldo?.cupo ?? undefined),
+    };
+  }).filter((c) => c.numero);
+
+  debugLog.push(`6. Total cuentas listadas: ${cuentasInfo.length}`);
+  for (const c of cuentasInfo) {
+    debugLog.push(`  ${c.alias} (${c.mascara}): ${c.saldo != null ? `$${c.saldo.toLocaleString("es-CL")}` : "sin saldo"} ${c.moneda}`);
+  }
+
+  await doSave(page, "06-cuentas-personas");
+  const screenshot = await page.screenshot({ encoding: "base64" }) as string;
+
+  return {
+    success: true, bank,
+    movements: [],
+    cuentas: cuentasInfo,
+    screenshot, debug: debugLog.join("\n"),
+  };
+}
 
 /**
  * Lista las cuentas de la empresa con su saldo actual.
@@ -1519,6 +1739,7 @@ async function agregarBeneficiario(
   page: Page,
   rut: string,
   password: string,
+  companyRut: string | null,
   datos: BeneficiarioData,
   debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
@@ -1536,8 +1757,59 @@ async function agregarBeneficiario(
 
   await closePopups(page);
 
+  // ─── Seleccionar la empresa donde se agregará el beneficiario ───
+  debugLog.push("5. Seleccionando empresa...");
+  let empresas: ApiEmpresa[];
+  try {
+    empresas = await getEmpresas(page);
+    debugLog.push(`  Empresas disponibles: ${empresas.length}`);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener listado de empresas: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  let selectedEmpresa: ApiEmpresa;
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
+    if (!found.ok || !found.empresa) {
+      return { success: false, bank, movements: [], error: found.error, debug: debugLog.join("\n") };
+    }
+    const targetEmpresa = found.empresa;
+    if (!targetEmpresa.seleccionada) {
+      debugLog.push(`  Empresa ${targetEmpresa.nombreFantasia} no está seleccionada. Cambiando...`);
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
+      if (!changed) {
+        return {
+          success: false, bank, movements: [],
+          error: `No se pudo cambiar a la empresa ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa}).`,
+          debug: debugLog.join("\n"),
+        };
+      }
+      empresas = await getEmpresas(page);
+      selectedEmpresa = empresas.find((e) => empresaMatchesRut(e, companyRut)) ?? targetEmpresa;
+    } else {
+      selectedEmpresa = targetEmpresa;
+    }
+    debugLog.push(`  Empresa seleccionada: ${selectedEmpresa.nombreFantasia} (${selectedEmpresa.rutEmpresa})`);
+  } else {
+    const sel = empresas.find((e) => e.seleccionada);
+    if (!sel) {
+      return {
+        success: false, bank, movements: [],
+        error: "No hay empresa seleccionada. Especifique --scope business:RUT con el RUT de la empresa donde agregar el beneficiario.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    selectedEmpresa = sel;
+    debugLog.push(`  Usando empresa seleccionada: ${selectedEmpresa.nombreFantasia} (${selectedEmpresa.rutEmpresa})`);
+  }
+
   // Navegar directo al formulario de agregar beneficiario
-  debugLog.push("5. Navegando al formulario de agregar beneficiario...");
+  debugLog.push("6. Navegando al formulario de agregar beneficiario...");
   const formUrl = "https://portalempresas.bancochile.cl/mibancochile-web/front/empresa/index.html#/portal/tefTransferencias/agenda/agregarBeneficiario";
   try {
     await page.goto(formUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
@@ -1547,7 +1819,7 @@ async function agregarBeneficiario(
   await delay(3000);
 
   // Esperar campos del formulario
-  debugLog.push("6. Esperando formulario...");
+  debugLog.push("7. Esperando formulario...");
   try {
     await Promise.all([
       page.waitForSelector('[name="rutBeneficiario"]', { visible: true, timeout: 15000 }),
@@ -1564,7 +1836,7 @@ async function agregarBeneficiario(
   await doSave(page, "07-formulario-listos");
 
   // Llenar RUT del beneficiario
-  debugLog.push("7. Llenando RUT del beneficiario...");
+  debugLog.push("8. Llenando RUT del beneficiario...");
   const rutLimpio = normalizeRutBeneficiario(datos.rutBeneficiario);
   try {
     await page.click('[name="rutBeneficiario"]', { clickCount: 3 });
@@ -1579,7 +1851,7 @@ async function agregarBeneficiario(
   }
 
   // Llenar nombre del beneficiario (mayúsculas)
-  debugLog.push("8. Llenando nombre del beneficiario...");
+  debugLog.push("9. Llenando nombre del beneficiario...");
   const nombreSelector = 'input[placeholder*="Empresa de Construcci"], input[placeholder*="Nombres"]';
   try {
     await page.click(nombreSelector, { clickCount: 3 });
@@ -1963,34 +2235,48 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
       Object.defineProperty(navigator, "webdriver", { get: () => false });
     });
 
-    // ─── Flujo Empresa ─────────────────────────────────────────────
-    if (isEmpresa) {
-      // Acción: listar cuentas (--cuentas)
-      if (options.action === "listar-cuentas") {
+    // Acciones: listar cuentas / listar beneficiarios / agregar beneficiario
+    if (options.action === "listar-cuentas") {
+      // Empresas: listar cuentas de la empresa
+      if (isEmpresa) {
         return await listarCuentasEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
       }
-      // Acción: agregar beneficiario (--add-beneficiario)
-      if (options.action === "agregar-beneficiario") {
-        if (!options.beneficiario) {
-          return {
-            success: false, bank, movements: [],
-            error: "Faltan datos del beneficiario. Usa --beneficiario-rut, --beneficiario-nombre, --beneficiario-banco, --beneficiario-cuenta, --beneficiario-tipo.",
-            debug: debugLog.join("\n"),
-          };
-        }
-        return await agregarBeneficiario(page, rut, password, options.beneficiario, debugLog, doSave, !!doScreenshots);
-      }
-      // Acción por defecto: scrape completo
-      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots);
+      // Personas: listar todas las cuentas del cliente
+      return await listarCuentasPersonal(page, rut, password, debugLog, doSave);
     }
 
-    // Acciones no soportadas en personas
-    if (options.action === "listar-cuentas" || options.action === "agregar-beneficiario") {
-      return {
-        success: false, bank, movements: [],
-        error: `La acción "${options.action}" solo está disponible para empresas (--scope business).`,
-        debug: debugLog.join("\n"),
-      };
+    if (options.action === "listar-beneficiarios") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "listar-beneficiarios" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      return await listarBeneficiariosEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
+    }
+
+    if (options.action === "agregar-beneficiario") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "agregar-beneficiario" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      if (!options.beneficiario) {
+        return {
+          success: false, bank, movements: [],
+          error: "Faltan datos del beneficiario. Usa --beneficiario-rut, --beneficiario-nombre, --beneficiario-banco, --beneficiario-cuenta, --beneficiario-tipo.",
+          debug: debugLog.join("\n"),
+        };
+      }
+      return await agregarBeneficiario(page, rut, password, scope?.companyRut ?? null, options.beneficiario, debugLog, doSave, !!doScreenshots);
+    }
+
+    // ─── Flujo Empresa ─────────────────────────────────────────────
+    if (isEmpresa) {
+      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots);
     }
 
     // ─── Flujo Personas (existente) ─────────────────────────────────

@@ -51,7 +51,8 @@ Opciones:
   --movements         Solo imprimir movimientos (sin metadata)
   --owner <T|A|B>     Filtro Titular/Adicional para TC (default: B = todos)
   --scope <tipo>      Alcance: personal | business | business:RUT (ej: business:77967769-9)
-  --cuentas           [EMPRESAS] Listar cuentas con saldo (sin movimientos)
+  --cuentas           [EMPRESAS/PERSONAS] Listar cuentas con saldo (sin movimientos)
+  --beneficiarios     [EMPRESAS] Listar todos los beneficiarios de la agenda TEF
   --add-beneficiario  [EMPRESAS] Agregar beneficiario/cuenta en el portal
   --beneficiario-rut <rut>      RUT del beneficiario (con --add-beneficiario)
   --beneficiario-nombre <n>     Nombre del beneficiario
@@ -174,10 +175,12 @@ Ejemplos:
     }
   }
 
-  // Parse acciones: --cuentas | --add-beneficiario
-  let action: "listar-cuentas" | "agregar-beneficiario" | undefined;
+  // Parse acciones: --cuentas | --beneficiarios | --add-beneficiario
+  let action: "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario" | undefined;
   if (flags.has("--cuentas")) {
     action = "listar-cuentas";
+  } else if (flags.has("--beneficiarios")) {
+    action = "listar-beneficiarios";
   } else if (flags.has("--add-beneficiario")) {
     action = "agregar-beneficiario";
   }

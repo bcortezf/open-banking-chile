@@ -168,7 +168,7 @@ export interface BeneficiarioData {
 }
 
 /** Acción a ejecutar en el banco */
-export type BankAction = "scrape" | "listar-cuentas" | "agregar-beneficiario";
+export type BankAction = "scrape" | "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario";
 
 /** Opciones para el scraper */
 export interface ScraperOptions extends BankCredentials {
