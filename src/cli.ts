@@ -51,6 +51,13 @@ Opciones:
   --movements         Solo imprimir movimientos (sin metadata)
   --owner <T|A|B>     Filtro Titular/Adicional para TC (default: B = todos)
   --scope <tipo>      Alcance: personal | business | business:RUT (ej: business:77967769-9)
+  --cuentas           [EMPRESAS] Listar cuentas con saldo (sin movimientos)
+  --add-beneficiario  [EMPRESAS] Agregar beneficiario/cuenta en el portal
+  --beneficiario-rut <rut>      RUT del beneficiario (con --add-beneficiario)
+  --beneficiario-nombre <n>     Nombre del beneficiario
+  --beneficiario-banco <b>      Banco (ej: "BANCO DEL ESTADO DE CHILE")
+  --beneficiario-cuenta <n>     Número de cuenta
+  --beneficiario-tipo <t>       Tipo: "Cuenta Corriente" | "Cuenta Vista" (default: Cuenta Corriente)
   --help, -h          Mostrar esta ayuda
 
 Variables de entorno:
@@ -167,6 +174,28 @@ Ejemplos:
     }
   }
 
+  // Parse acciones: --cuentas | --add-beneficiario
+  let action: "listar-cuentas" | "agregar-beneficiario" | undefined;
+  if (flags.has("--cuentas")) {
+    action = "listar-cuentas";
+  } else if (flags.has("--add-beneficiario")) {
+    action = "agregar-beneficiario";
+  }
+
+  // Parse datos del beneficiario (--add-beneficiario)
+  const valorFlag = (flag: string): string | undefined => {
+    const arg = args.find((a) => a === flag || a.startsWith(`${flag}=`));
+    if (!arg) return undefined;
+    return arg.includes("=") ? arg.split("=")[1] : args[args.indexOf(arg) + 1]?.trim();
+  };
+  const beneficiario = action === "agregar-beneficiario" ? {
+    rutBeneficiario: valorFlag("--beneficiario-rut") ?? "",
+    nombreBeneficiario: valorFlag("--beneficiario-nombre") ?? "",
+    banco: valorFlag("--beneficiario-banco") ?? "",
+    numeroCuenta: valorFlag("--beneficiario-cuenta") ?? "",
+    tipoCuenta: valorFlag("--beneficiario-tipo") ?? "Cuenta Corriente",
+  } : undefined;
+
   const result = await bank.scrape({
     rut,
     password,
@@ -175,6 +204,8 @@ Ejemplos:
     headful: flags.has("--headful"),
     ...(owner && { owner }),
     ...(scope && { scope }),
+    ...(action && { action }),
+    ...(beneficiario && { beneficiario }),
   });
 
   if (!result.success) {
@@ -190,6 +221,8 @@ Ejemplos:
 
   if (flags.has("--movements")) {
     console.log(JSON.stringify(result.movements, null, indent));
+  } else if (flags.has("--cuentas") && result.cuentas) {
+    console.log(JSON.stringify(result.cuentas, null, indent));
   } else {
     const { screenshot: _, ...output } = result;
     console.log(JSON.stringify(output, null, indent));

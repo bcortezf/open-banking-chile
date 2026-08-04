@@ -101,12 +101,36 @@ export interface ScrapeResult {
   movements?: BankMovement[];
   /** @deprecated Use accounts[].balance instead. Kept for compatibility during migration. */
   balance?: number;
+  /** Cuentas bancarias listadas (sin movimientos) — para --cuentas */
+  cuentas?: BankAccountInfo[];
   /** Mensaje de error si success = false */
   error?: string;
   /** Screenshot en base64 (para debugging) */
   screenshot?: string;
   /** Log de debug con pasos del scraper */
   debug?: string;
+}
+
+/** Información de una cuenta bancaria (para listado de cuentas) */
+export interface BankAccountInfo {
+  /** Nombre de la empresa titular (solo empresas) */
+  empresa?: string;
+  /** RUT de la empresa (solo empresas) */
+  rutEmpresa?: string;
+  /** Número de cuenta */
+  numero: string;
+  /** Número enmascarado (ej: ****1234) */
+  mascara?: string;
+  /** Alias de la cuenta */
+  alias?: string;
+  /** Código de producto (ej: JUV, CCI) */
+  codigoProducto?: string;
+  /** Clase de cuenta (ej: CVIEMP, CCIEMP) */
+  claseCuenta?: string;
+  /** Moneda (CLP, USD, UF) */
+  moneda?: string;
+  /** Saldo actual (si se pudo obtener) */
+  saldo?: number;
 }
 
 /** Credenciales de autenticación */
@@ -125,6 +149,27 @@ export interface Scope {
   companyRut?: string;
 }
 
+/** Datos para agregar un beneficiario/cuenta en el banco */
+export interface BeneficiarioData {
+  /** Nombre exacto del banco en el dropdown (ej: "BANCO DEL ESTADO DE CHILE") */
+  banco: string;
+  /** Índice del banco en el dropdown (0-based, opcional) */
+  bancoIndex?: number;
+  /** Número de cuenta (máximo 20 caracteres) */
+  numeroCuenta: string;
+  /** Tipo de cuenta: 'Cuenta Corriente' | 'Cuenta Vista' | otro */
+  tipoCuenta: string;
+  /** RUT del beneficiario (con o sin formato, ej: "12345678-9") */
+  rutBeneficiario: string;
+  /** Nombre del beneficiario */
+  nombreBeneficiario: string;
+  /** Email del beneficiario (opcional) */
+  email?: string;
+}
+
+/** Acción a ejecutar en el banco */
+export type BankAction = "scrape" | "listar-cuentas" | "agregar-beneficiario";
+
 /** Opciones para el scraper */
 export interface ScraperOptions extends BankCredentials {
   /** Ruta al ejecutable de Chrome/Chromium. Si no se provee, busca automáticamente. */
@@ -137,6 +182,10 @@ export interface ScraperOptions extends BankCredentials {
   owner?: "T" | "A" | "B";
   /** Alcance: personal (default) o business con RUT de empresa opcional */
   scope?: Scope;
+  /** Acción a ejecutar (default: "scrape") */
+  action?: BankAction;
+  /** Datos del beneficiario para action="agregar-beneficiario" */
+  beneficiario?: BeneficiarioData;
   /** @deprecated Use scope.type="business" en su lugar. */
   empresa?: boolean;
   /** @deprecated Use scope.companyRut en su lugar. */
