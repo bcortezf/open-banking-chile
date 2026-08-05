@@ -34,18 +34,12 @@ jobs:
       - name: 🏗️ Build
         run: npm run build
 
-      - name: 🏦 Run E2E tests (BCHILE)
+      - name: 🏦 Run E2E tests (bchile + falabella)
         env:
+          E2E_BANKS: bchile,falabella
           BCHILE_RUT: ${{ secrets.BCHILE_RUT }}
           BCHILE_PASS: ${{ secrets.BCHILE_PASS }}
-          # Timeout generoso para aprobar 2FA manualmente si aplica
           BCHILE_2FA_TIMEOUT_SEC: "300"
+          FALABELLA_RUT: ${{ secrets.FALABELLA_RUT }}
+          FALABELLA_PASS: ${{ secrets.FALABELLA_PASS }}
         run: npx vitest run src/e2e.test.ts
-
-      - name: 🏦 Run E2E tests (BANCO_2 — opcional)
-        if: env.OTRO_RUT != ''
-        env:
-          OTRO_RUT: ${{ secrets.OTRO_BANCO_RUT }}
-          OTRO_PASS: ${{ secrets.OTRO_BANCO_PASS }}
-        run: |
-          echo "Configura más bancos agregando sus secrets y jobs E2E"
