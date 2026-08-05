@@ -29,8 +29,22 @@ export interface BankMovement {
   source: MovementSource;
   /** Titular o adicional de la tarjeta */
   owner?: CardOwner;
+  /** Identificador de la tarjeta (ej: "****8335") — útil cuando hay múltiples tarjetas */
+  card?: string;
   /** Cuotas (ej: "01/01", "02/06") */
   installments?: string;
+  /** Monto total de la compra (distinto de amount cuando es en cuotas) */
+  totalAmount?: number;
+}
+
+/** Saldo y movimientos de una cuenta bancaria */
+export interface AccountBalance {
+  /** Identificador de la cuenta (ej: "Cuenta Corriente ****2706") */
+  label?: string;
+  /** Saldo actual */
+  balance?: number;
+  /** Movimientos de la cuenta */
+  movements: BankMovement[];
 }
 
 /** Saldo de una tarjeta de crédito */
@@ -52,8 +66,25 @@ export interface CreditCardBalance {
   };
   /** Periodo de facturación actual (ej: "Febrero 2026") */
   billingPeriod?: string;
-  /** Próxima fecha de facturación (ej: "19 de marzo") */
+  /** Próxima fecha de facturación (formato dd-mm-yyyy) */
   nextBillingDate?: string;
+  /** Próxima fecha de vencimiento de pago (formato dd-mm-yyyy) */
+  nextDueDate?: string;
+  /** Gastos del período actual (no facturados) */
+  periodExpenses?: number;
+  /** Datos del último estado de cuenta facturado */
+  lastStatement?: {
+    /** Fecha de facturación dd-mm-yyyy */
+    billingDate: string;
+    /** Monto total facturado */
+    billedAmount: number;
+    /** Fecha de vencimiento dd-mm-yyyy */
+    dueDate: string;
+    /** Pago mínimo */
+    minimumPayment?: number;
+  };
+  /** Movimientos de la tarjeta */
+  movements?: BankMovement[];
 }
 
 /** Resultado del scraping */
@@ -62,18 +93,44 @@ export interface ScrapeResult {
   success: boolean;
   /** Nombre del banco */
   bank: string;
-  /** Lista de movimientos encontrados */
-  movements: BankMovement[];
-  /** Saldo actual de la cuenta */
-  balance?: number;
+  /** Cuentas bancarias con sus movimientos */
+  accounts?: AccountBalance[];
   /** Saldos de tarjetas de crédito */
   creditCards?: CreditCardBalance[];
+  /** @deprecated Use accounts[].movements instead. Kept for compatibility during migration. */
+  movements?: BankMovement[];
+  /** @deprecated Use accounts[].balance instead. Kept for compatibility during migration. */
+  balance?: number;
+  /** Cuentas bancarias listadas (sin movimientos) — para --cuentas */
+  cuentas?: BankAccountInfo[];
   /** Mensaje de error si success = false */
   error?: string;
   /** Screenshot en base64 (para debugging) */
   screenshot?: string;
   /** Log de debug con pasos del scraper */
   debug?: string;
+}
+
+/** Información de una cuenta bancaria (para listado de cuentas) */
+export interface BankAccountInfo {
+  /** Nombre de la empresa titular (solo empresas) */
+  empresa?: string;
+  /** RUT de la empresa (solo empresas) */
+  rutEmpresa?: string;
+  /** Número de cuenta */
+  numero: string;
+  /** Número enmascarado (ej: ****1234) */
+  mascara?: string;
+  /** Alias de la cuenta */
+  alias?: string;
+  /** Código de producto (ej: JUV, CCI) */
+  codigoProducto?: string;
+  /** Clase de cuenta (ej: CVIEMP, CCIEMP) */
+  claseCuenta?: string;
+  /** Moneda (CLP, USD, UF) */
+  moneda?: string;
+  /** Saldo actual (si se pudo obtener) */
+  saldo?: number;
 }
 
 /** Credenciales de autenticación */
@@ -83,6 +140,35 @@ export interface BankCredentials {
   /** Clave de internet del banco */
   password: string;
 }
+
+/** Alcance de la consulta: personal o empresa */
+export interface Scope {
+  /** Tipo de alcance */
+  type: "personal" | "business";
+  /** RUT de la empresa (solo para business) */
+  companyRut?: string;
+}
+
+/** Datos para agregar un beneficiario/cuenta en el banco */
+export interface BeneficiarioData {
+  /** Nombre exacto del banco en el dropdown (ej: "BANCO DEL ESTADO DE CHILE") */
+  banco: string;
+  /** Índice del banco en el dropdown (0-based, opcional) */
+  bancoIndex?: number;
+  /** Número de cuenta (máximo 20 caracteres) */
+  numeroCuenta: string;
+  /** Tipo de cuenta: 'Cuenta Corriente' | 'Cuenta Vista' | otro */
+  tipoCuenta: string;
+  /** RUT del beneficiario (con o sin formato, ej: "12345678-9") */
+  rutBeneficiario: string;
+  /** Nombre del beneficiario */
+  nombreBeneficiario: string;
+  /** Email del beneficiario (opcional) */
+  email?: string;
+}
+
+/** Acción a ejecutar en el banco */
+export type BankAction = "scrape" | "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario";
 
 /** Opciones para el scraper */
 export interface ScraperOptions extends BankCredentials {
@@ -94,10 +180,20 @@ export interface ScraperOptions extends BankCredentials {
   headful?: boolean;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */
   owner?: "T" | "A" | "B";
-  /** [BCHILE Empresas] RUT de la empresa a consultar (ej: "77123456-1"). Si se especifica, valida que la empresa esté seleccionada. Si no, usa la empresa actualmente seleccionada. */
-  bankQuery?: string;
-  /** [BCHILE] Usar portal empresas (login.portalempresas). Requiere bankQuery o usa la empresa seleccionada. */
+  /** Alcance: personal (default) o business con RUT de empresa opcional */
+  scope?: Scope;
+  /** Acción a ejecutar (default: "scrape") */
+  action?: BankAction;
+  /** Datos del beneficiario para action="agregar-beneficiario" */
+  beneficiario?: BeneficiarioData;
+  /** @deprecated Use scope.type="business" en su lugar. */
   empresa?: boolean;
+  /** @deprecated Use scope.companyRut en su lugar. */
+  bankQuery?: string;
+  /** Callback de progreso para mostrar estado al usuario */
+  onProgress?: (step: string) => void;
+  /** Callback invocado en cada línea de debug en tiempo real */
+  onDebug?: (line: string) => void;
 }
 
 /** Interfaz que debe implementar cada banco */
@@ -111,3 +207,5 @@ export interface BankScraper {
   /** Ejecutar el scraping */
   scrape(options: ScraperOptions): Promise<ScrapeResult>;
 }
+
+export { MOVEMENT_SOURCE as default };

@@ -39,16 +39,19 @@ jobs:
         run: |
           python .github/scripts/ai_review.py
 
-      - name: 🏷️ Label PR
-        if: always()
+      - name: 🏷️ Label PR (if applicable)
+        if: always() && github.event_name == 'pull_request'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           AI_VERDICT: ${{ steps.ai-review.outcome }}
         run: |
+          # Create labels if they don't exist, then add
           if [ "$AI_VERDICT" = "failure" ]; then
-            gh pr edit $PR_NUMBER --add-label "⚠️ Security Review" --repo $REPO
+            gh label create "security-review" --color "d73a4a" --repo $REPO 2>/dev/null || true
+            gh pr edit $PR_NUMBER --add-label "security-review" --repo $REPO
           else
-            gh pr edit $PR_NUMBER --add-label "✅ AI Reviewed" --repo $REPO
+            gh label create "ai-reviewed" --color "0e8a16" --repo $REPO 2>/dev/null || true
+            gh pr edit $PR_NUMBER --add-label "ai-reviewed" --repo $REPO
           fi

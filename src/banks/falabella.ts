@@ -356,14 +356,14 @@ async function extractMovementsFromPage(page: Page): Promise<BankMovement[]> {
       }
     }
     return results;
-  }).then(raw =>
+  }).then((raw: Array<Record<string, unknown>>) =>
     raw
-      .filter(m => m.description || m.amount !== 0)
-      .map(m => ({
-        date: normalizeDate(m.date),
-        description: m.description,
-        amount: m.amount,
-        balance: m.balance,
+      .filter((m: Record<string, unknown>) => m.description || m.amount !== 0)
+      .map((m: Record<string, unknown>) => ({
+        date: normalizeDate(m.date as string),
+        description: m.description as string,
+        amount: m.amount as number,
+        balance: m.balance as number,
         source: MOVEMENT_SOURCE.account as MovementSource,
       }))
   );

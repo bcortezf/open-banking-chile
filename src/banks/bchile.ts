@@ -1,5 +1,5 @@
 import puppeteer, { type Page } from "puppeteer-core";
-import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions } from "../types.js";
+import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions, BankAccountInfo, BeneficiarioData } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
 import { closePopups, delay, findChrome, formatRut, saveScreenshot, normalizeDate, deduplicateMovements, logout, normalizeInstallments } from "../utils.js";
 
@@ -224,6 +224,9 @@ async function detectLoginError(page: Page): Promise<string | null> {
       "suspendida",
       "sesión activa",
       "ya tiene una sesión",
+      "reactivar",
+      "clave bloqueada",
+      "clave suspendida",
     ];
 
     for (const text of errorTexts) {
@@ -768,14 +771,14 @@ function empresaMatchesRut(empresa: ApiEmpresa, rutQuery: string): boolean {
 /** Valida que la empresa exista. Retorna la empresa (seleccionada o no). */
 function findEmpresaByQuery(
   empresas: ApiEmpresa[],
-  bankQuery: string,
+  companyRut: string,
   debugLog: string[]
 ): { ok: boolean; empresa?: ApiEmpresa; error?: string } {
-  const empresa = empresas.find((e) => empresaMatchesRut(e, bankQuery));
+  const empresa = empresas.find((e) => empresaMatchesRut(e, companyRut));
   if (!empresa) {
     return {
       ok: false,
-      error: `Empresa RUT ${bankQuery} no encontrada en el listado. Empresas disponibles: ${empresas.map((e) => e.rutEmpresa).join(", ")}`,
+      error: `Empresa RUT ${companyRut} no encontrada en el listado. Empresas disponibles: ${empresas.map((e) => e.rutEmpresa).join(", ")}`,
     };
   }
   return { ok: true, empresa };
@@ -817,7 +820,7 @@ async function getEmpresaCuentas(
 ): Promise<EmpresaCuentaSeleccionada[]> {
   // Navegar al dashboard para cargar contexto
   await page.goto(EMPRESA_DASHBOARD_URL, { waitUntil: "networkidle2", timeout: 30000 });
-  await delay(3000);
+  await delay(5000);
 
   // Intentar endpoint de productos/cuentas (patrón similar a personas)
   const endpoints = [
@@ -1252,7 +1255,7 @@ async function scrapeEmpresa(
   page: Page,
   rut: string,
   password: string,
-  bankQuery: string | null,
+  companyRut: string | null,
   debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
   doScreenshots: boolean
@@ -1284,8 +1287,8 @@ async function scrapeEmpresa(
   }
 
   let selectedEmpresa: ApiEmpresa;
-  if (bankQuery) {
-    const found = findEmpresaByQuery(empresas, bankQuery, debugLog);
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
     if (!found.ok || !found.empresa) {
       return {
         success: false, bank, movements: [],
@@ -1295,7 +1298,7 @@ async function scrapeEmpresa(
     const targetEmpresa = found.empresa;
     if (!targetEmpresa.seleccionada) {
       debugLog.push(`  Empresa ${targetEmpresa.nombreFantasia} no está seleccionada. Cambiando...`);
-      const changed = await cambiarEmpresaSeleccionada(page, empresas, bankQuery, debugLog);
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
       if (!changed) {
         return {
           success: false, bank, movements: [],
@@ -1304,7 +1307,7 @@ async function scrapeEmpresa(
         };
       }
       empresas = await getEmpresas(page);
-      const updated = empresas.find((e) => empresaMatchesRut(e, bankQuery));
+      const updated = empresas.find((e) => empresaMatchesRut(e, companyRut));
       selectedEmpresa = updated ?? targetEmpresa;
     } else {
       selectedEmpresa = targetEmpresa;
@@ -1315,7 +1318,7 @@ async function scrapeEmpresa(
     if (!sel) {
       return {
         success: false, bank, movements: [],
-        error: "No hay empresa seleccionada. Especifique --bankQuery con el RUT de la empresa a consultar.",
+        error: "No hay empresa seleccionada. Especifique --companyRut con el RUT de la empresa a consultar.",
         debug: debugLog.join("\n"),
       };
     }
@@ -1346,12 +1349,860 @@ async function scrapeEmpresa(
   };
 }
 
+// ─── Acción: listar beneficiarios de la agenda TEF ────────────────
+
+/**
+ * Lista todos los beneficiarios (cuentas) de la agenda TEF de la empresa.
+ * Acción: --beneficiarios (scope business)
+ */
+async function listarBeneficiariosEmpresa(
+  page: Page,
+  rut: string,
+  password: string,
+  companyRut: string | null,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  await closePopups(page);
+
+  // Seleccionar empresa
+  debugLog.push("5. Seleccionando empresa...");
+  let empresas: ApiEmpresa[];
+  try {
+    empresas = await getEmpresas(page);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener listado de empresas: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
+    if (!found.ok || !found.empresa) {
+      return { success: false, bank, movements: [], error: found.error, debug: debugLog.join("\n") };
+    }
+    const targetEmpresa = found.empresa;
+    if (!targetEmpresa.seleccionada) {
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
+      if (!changed) {
+        return {
+          success: false, bank, movements: [],
+          error: `No se pudo cambiar a la empresa ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa}).`,
+          debug: debugLog.join("\n"),
+        };
+      }
+    }
+    debugLog.push(`  Empresa: ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa})`);
+  } else {
+    const sel = empresas.find((e) => e.seleccionada);
+    if (!sel) {
+      return {
+        success: false, bank, movements: [],
+        error: "No hay empresa seleccionada. Especifique --scope business:RUT.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    debugLog.push(`  Empresa: ${sel.nombreFantasia} (${sel.rutEmpresa})`);
+  }
+
+  // Consultar agenda TEF (misma API que usa Tickefy)
+  debugLog.push("6. Consultando agenda TEF...");
+  let beneficiarios: Array<Record<string, unknown>> = [];
+  try {
+    const data = await apiGetEmpresa<unknown>(page, "tef-agenda/agenda/filtro?favorito=0");
+    if (Array.isArray(data)) {
+      beneficiarios = data as Array<Record<string, unknown>>;
+    } else if (data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      if (Array.isArray(d.listaBeneficiarios)) {
+        beneficiarios = d.listaBeneficiarios as Array<Record<string, unknown>>;
+      } else if (Array.isArray(d.destinatarios)) {
+        beneficiarios = d.destinatarios as Array<Record<string, unknown>>;
+      } else {
+        for (const v of Object.values(d)) {
+          if (Array.isArray(v)) { beneficiarios = v as Array<Record<string, unknown>>; break; }
+        }
+      }
+    }
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener la agenda de beneficiarios: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  // Mapear a BankAccountInfo (reutilizar el tipo para consistencia)
+  const cuentasInfo: BankAccountInfo[] = beneficiarios.map((b) => ({
+    empresa: String(b.nombreRazonSocial ?? b.nombre ?? b.razonSocial ?? b.nombreBeneficiario ?? ""),
+    rutEmpresa: String(b.rutBeneficiario ?? b.rut ?? ""),
+    numero: String(b.numeroCuenta ?? b.cuenta ?? b.id ?? ""),
+    alias: String(b.alias ?? b.aliasCuenta ?? "") || undefined,
+    claseCuenta: String(b.tipoCuenta ?? b.tipo ?? b.descripcionTipoCuenta ?? "") || undefined,
+    moneda: "CLP",
+  })).filter((c) => c.numero);
+
+  debugLog.push(`7. Beneficiarios encontrados: ${cuentasInfo.length}`);
+  for (const c of cuentasInfo) {
+    debugLog.push(`  ${c.empresa} (${c.rutEmpresa}) — ${c.claseCuenta} ${c.numero}${c.alias ? ` (${c.alias})` : ""}`);
+  }
+
+  await doSave(page, "06-beneficiarios");
+  const screenshot = await page.screenshot({ encoding: "base64" }) as string;
+
+  return {
+    success: true, bank,
+    movements: [],
+    cuentas: cuentasInfo,
+    screenshot, debug: debugLog.join("\n"),
+  };
+}
+
+// ─── Acción: listar cuentas (sin movimientos) ─────────────────────
+
+/**
+ * Lista todas las cuentas del cliente (personas): corriente, vista,
+ * ahorro, línea de crédito, etc. con su saldo actual.
+ * Acción: --cuentas (scope personal)
+ */
+async function listarCuentasPersonal(
+  page: Page,
+  rut: string,
+  password: string,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await login(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  // Cerrar modal overlay post-login
+  try {
+    await page.waitForSelector("#modal_emergente_close, .cdk-overlay-container .btn-no-mas", { timeout: 8000 });
+    await page.evaluate(() => {
+      const closeBtn = document.querySelector("#modal_emergente_close") as HTMLElement | null;
+      if (closeBtn) { closeBtn.click(); return true; }
+      const noMasBtn = document.querySelector(".btn-no-mas") as HTMLElement | null;
+      if (noMasBtn) { noMasBtn.click(); return true; }
+      return false;
+    });
+    await delay(1500);
+  } catch {
+    // sin modal
+  }
+  await closePopups(page);
+
+  // Obtener productos (todas las cuentas) y saldos
+  debugLog.push("5. Fetching productos y saldos via API...");
+  let products: ApiProductsResponse;
+  let saldos: ApiAccountBalance[] = [];
+  try {
+    products = await apiGet<ApiProductsResponse>(page, "selectorproductos/selectorProductos/obtenerProductos?incluirTarjetas=true");
+    debugLog.push(`  Productos encontrados: ${products.productos.length}`);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener el listado de productos: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  try {
+    saldos = await apiGet<ApiAccountBalance[]>(page, "bff-pp-prod-ctas-saldos/productos/cuentas/saldos");
+    debugLog.push(`  Saldos obtenidos: ${saldos.length}`);
+  } catch (err) {
+    debugLog.push(`  No se pudieron obtener saldos: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Combinar productos con saldos
+  const cuentasInfo: BankAccountInfo[] = products.productos.map((p) => {
+    const saldo = saldos.find((s) => s.numero === p.numero || s.codProducto === p.codigo);
+    const tipo = p.tipo || saldo?.tipo || p.claseCuenta || "CUENTA";
+    const nombreTipo = tipo === "CUENTA_CORRIENTE" ? "Cuenta Corriente"
+      : tipo === "CUENTA_VISTA" ? "Cuenta Vista"
+      : tipo === "LINEA_CREDITO" || tipo === "LINEA_DE_CREDITO" ? "Línea de Crédito"
+      : tipo === "CUENTA_AHORRO" || tipo === "CUENTA_DE_AHORRO" ? "Cuenta de Ahorro"
+      : p.label || tipo;
+    return {
+      numero: p.numero,
+      mascara: p.mascara || `****${p.numero.slice(-4)}`,
+      alias: nombreTipo,
+      codigoProducto: p.codigo || p.codigoMoneda,
+      claseCuenta: p.claseCuenta || p.tipo,
+      moneda: p.codigoMoneda || saldo?.moneda || "CLP",
+      saldo: saldo?.disponible ?? (saldo?.cupo ?? undefined),
+    };
+  }).filter((c) => c.numero);
+
+  debugLog.push(`6. Total cuentas listadas: ${cuentasInfo.length}`);
+  for (const c of cuentasInfo) {
+    debugLog.push(`  ${c.alias} (${c.mascara}): ${c.saldo != null ? `$${c.saldo.toLocaleString("es-CL")}` : "sin saldo"} ${c.moneda}`);
+  }
+
+  await doSave(page, "06-cuentas-personas");
+  const screenshot = await page.screenshot({ encoding: "base64" }) as string;
+
+  return {
+    success: true, bank,
+    movements: [],
+    cuentas: cuentasInfo,
+    screenshot, debug: debugLog.join("\n"),
+  };
+}
+
+/**
+ * Lista las cuentas de la empresa con su saldo actual.
+ * Acción: --cuentas (scope business)
+ */
+async function listarCuentasEmpresa(
+  page: Page,
+  rut: string,
+  password: string,
+  companyRut: string | null,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  await closePopups(page);
+
+  debugLog.push("5. Fetching empresas...");
+  let empresas: ApiEmpresa[];
+  try {
+    empresas = await getEmpresas(page);
+    debugLog.push(`  Empresas disponibles: ${empresas.length}`);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener listado de empresas: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  let selectedEmpresa: ApiEmpresa;
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
+    if (!found.ok || !found.empresa) {
+      return { success: false, bank, movements: [], error: found.error, debug: debugLog.join("\n") };
+    }
+    const targetEmpresa = found.empresa;
+    if (!targetEmpresa.seleccionada) {
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
+      if (!changed) {
+        return {
+          success: false, bank, movements: [],
+          error: `No se pudo cambiar a la empresa ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa}).`,
+          debug: debugLog.join("\n"),
+        };
+      }
+      empresas = await getEmpresas(page);
+      selectedEmpresa = empresas.find((e) => empresaMatchesRut(e, companyRut)) ?? targetEmpresa;
+    } else {
+      selectedEmpresa = targetEmpresa;
+    }
+  } else {
+    const sel = empresas.find((e) => e.seleccionada);
+    if (!sel) {
+      return {
+        success: false, bank, movements: [],
+        error: "No hay empresa seleccionada. Especifique --companyRut con el RUT de la empresa a consultar.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    selectedEmpresa = sel;
+  }
+
+  debugLog.push(`6. Obteniendo cuentas de: ${selectedEmpresa.nombreFantasia} (${selectedEmpresa.rutEmpresa})...`);
+  const cuentas = await getEmpresaCuentas(page, selectedEmpresa, debugLog);
+  if (cuentas.length === 0) {
+    return {
+      success: false, bank, movements: [],
+      error: "No se pudieron obtener las cuentas de la empresa.",
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  // Obtener saldo por cuenta (endpoint de cartola, solo saldo)
+  const cuentasInfo: BankAccountInfo[] = [];
+  for (const cuenta of cuentas) {
+    const info: BankAccountInfo = {
+      empresa: cuenta.nombreEmpresa,
+      rutEmpresa: cuenta.rutEmpresa,
+      numero: cuenta.numero,
+      mascara: cuenta.mascara,
+      alias: cuenta.alias ?? undefined,
+      codigoProducto: cuenta.codigoProducto,
+      claseCuenta: cuenta.claseCuenta,
+      moneda: cuenta.moneda,
+    };
+
+    try {
+      const body = {
+        cabecera: {
+          paginacionDesde: {}, fechaInicio: null, fechaFin: null,
+          statusGenerico: true, saldoDisponibleAcumuladoAnterior: null,
+          saldoDisponibleAcumuladoDelDia: null,
+        },
+        cuentasSeleccionadas: [{ ...cuenta }],
+      };
+      const cartola = await apiPostEmpresa<ApiEmpresaCartolaResponse>(
+        page, "movimientos/getcartola", body
+      );
+      if (cartola.saldoDisponible != null) {
+        info.saldo = cartola.saldoDisponible;
+      }
+      debugLog.push(`  ${cuenta.mascara}: saldo ${info.saldo != null ? `$${info.saldo.toLocaleString("es-CL")}` : "n/d"}`);
+    } catch (err) {
+      debugLog.push(`  ${cuenta.mascara}: error al obtener saldo (${err instanceof Error ? err.message : String(err)})`);
+    }
+    cuentasInfo.push(info);
+  }
+
+  await doSave(page, "06-cuentas-listadas");
+  const screenshot = await page.screenshot({ encoding: "base64" }) as string;
+
+  return {
+    success: true, bank,
+    movements: [],
+    cuentas: cuentasInfo,
+    screenshot, debug: debugLog.join("\n"),
+  };
+}
+
+// ─── Acción: agregar beneficiario (port de Tickefy) ───────────────
+
+/** Normaliza un RUT a formato NNNNNNNN-DV */
+export function normalizeRutBeneficiario(rut: string): string {
+  let r = rut.toString().trim();
+  let numero = "";
+  let dv = "";
+
+  if (r.includes("-")) {
+    const partes = r.split("-");
+    numero = partes[0].replace(/\./g, "");
+    dv = partes[1] || "";
+  } else {
+    const ultimoChar = r.slice(-1);
+    if (isNaN(Number(ultimoChar)) || ultimoChar === "K" || ultimoChar === "k") {
+      numero = r.slice(0, -1).replace(/\./g, "");
+      dv = ultimoChar.toUpperCase();
+    } else {
+      const sinPuntos = r.replace(/\./g, "");
+      if (sinPuntos.length > 8) {
+        numero = sinPuntos.slice(0, -1);
+        dv = sinPuntos.slice(-1);
+      } else {
+        numero = sinPuntos;
+      }
+    }
+  }
+
+  return dv ? `${numero}-${dv.toUpperCase()}` : numero;
+}
+
+/**
+ * Agrega un beneficiario/cuenta en el portal empresas de Banco de Chile.
+ * Port del flujo funcional de Tickefy (agregar-beneficiario.js).
+ * Acción: --add-beneficiario (scope business)
+ */
+async function agregarBeneficiario(
+  page: Page,
+  rut: string,
+  password: string,
+  companyRut: string | null,
+  datos: BeneficiarioData,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>,
+  doScreenshots: boolean
+): Promise<ScrapeResult> {
+  const bank = "bchile";
+
+  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  if (!loginResult.success) {
+    return {
+      success: false, bank, movements: [],
+      error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+    };
+  }
+
+  await closePopups(page);
+
+  // ─── Seleccionar la empresa donde se agregará el beneficiario ───
+  debugLog.push("5. Seleccionando empresa...");
+  let empresas: ApiEmpresa[];
+  try {
+    empresas = await getEmpresas(page);
+    debugLog.push(`  Empresas disponibles: ${empresas.length}`);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo obtener listado de empresas: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  let selectedEmpresa: ApiEmpresa;
+  if (companyRut) {
+    const found = findEmpresaByQuery(empresas, companyRut, debugLog);
+    if (!found.ok || !found.empresa) {
+      return { success: false, bank, movements: [], error: found.error, debug: debugLog.join("\n") };
+    }
+    const targetEmpresa = found.empresa;
+    if (!targetEmpresa.seleccionada) {
+      debugLog.push(`  Empresa ${targetEmpresa.nombreFantasia} no está seleccionada. Cambiando...`);
+      const changed = await cambiarEmpresaSeleccionada(page, empresas, companyRut, debugLog);
+      if (!changed) {
+        return {
+          success: false, bank, movements: [],
+          error: `No se pudo cambiar a la empresa ${targetEmpresa.nombreFantasia} (${targetEmpresa.rutEmpresa}).`,
+          debug: debugLog.join("\n"),
+        };
+      }
+      empresas = await getEmpresas(page);
+      selectedEmpresa = empresas.find((e) => empresaMatchesRut(e, companyRut)) ?? targetEmpresa;
+    } else {
+      selectedEmpresa = targetEmpresa;
+    }
+    debugLog.push(`  Empresa seleccionada: ${selectedEmpresa.nombreFantasia} (${selectedEmpresa.rutEmpresa})`);
+  } else {
+    const sel = empresas.find((e) => e.seleccionada);
+    if (!sel) {
+      return {
+        success: false, bank, movements: [],
+        error: "No hay empresa seleccionada. Especifique --scope business:RUT con el RUT de la empresa donde agregar el beneficiario.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    selectedEmpresa = sel;
+    debugLog.push(`  Usando empresa seleccionada: ${selectedEmpresa.nombreFantasia} (${selectedEmpresa.rutEmpresa})`);
+  }
+
+  // Navegar directo al formulario de agregar beneficiario
+  debugLog.push("6. Navegando al formulario de agregar beneficiario...");
+  const formUrl = "https://portalempresas.bancochile.cl/mibancochile-web/front/empresa/index.html#/portal/tefTransferencias/agenda/agregarBeneficiario";
+  try {
+    await page.goto(formUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+  } catch {
+    // SPA — continuar
+  }
+  await delay(3000);
+
+  // Esperar campos del formulario
+  debugLog.push("7. Esperando formulario...");
+  try {
+    await Promise.all([
+      page.waitForSelector('[name="rutBeneficiario"]', { visible: true, timeout: 15000 }),
+      page.waitForSelector('input[placeholder*="Empresa de Construcci"], input[placeholder*="Nombres"]', { visible: true, timeout: 15000 }),
+    ]);
+  } catch (err) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se encontró el formulario de agregar beneficiario: ${err instanceof Error ? err.message : String(err)}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+  await doSave(page, "07-formulario-listos");
+
+  // Llenar RUT del beneficiario
+  debugLog.push("8. Llenando RUT del beneficiario...");
+  const rutLimpio = normalizeRutBeneficiario(datos.rutBeneficiario);
+  try {
+    await page.click('[name="rutBeneficiario"]', { clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await page.type('[name="rutBeneficiario"]', rutLimpio, { delay: 0 });
+  } catch (err) {
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo ingresar el RUT del beneficiario: ${err instanceof Error ? err.message : String(err)}`,
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  // Llenar nombre del beneficiario (mayúsculas)
+  debugLog.push("9. Llenando nombre del beneficiario...");
+  const nombreSelector = 'input[placeholder*="Empresa de Construcci"], input[placeholder*="Nombres"]';
+  try {
+    await page.click(nombreSelector, { clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    const nombreMayus = datos.nombreBeneficiario.toUpperCase();
+    await page.keyboard.press("CapsLock");
+    await page.type(nombreSelector, nombreMayus, { delay: 0 });
+    await page.keyboard.press("CapsLock");
+  } catch (err) {
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo ingresar el nombre del beneficiario: ${err instanceof Error ? err.message : String(err)}`,
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  // Click fuera para validar
+  try {
+    await page.keyboard.press("Tab");
+  } catch { /* ignore */ }
+  await delay(1000);
+  await doSave(page, "08-formulario-beneficiario-completo");
+
+  // Verificar errores de validación del RUT/nombre
+  const erroresValidacion = await page.evaluate(() => {
+    const palabras = ["no es válido", "inválido", "debe ingresar", "debe seleccionar", "formato.*incorrecto", "código.*inválido"];
+    const errores: { campo: string; texto: string }[] = [];
+    const formGroups = document.querySelectorAll(".form-group, [class*='form-control'], [class*='form-group']");
+    formGroups.forEach((fg) => {
+      const mensajes = fg.querySelectorAll(".error, .invalid, .text-danger, .alert-danger, .help-block, [class*='error'], [class*='invalid']");
+      mensajes.forEach((m) => {
+        const el = m as HTMLElement;
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return;
+        const texto = (el.textContent || "").trim();
+        if (!texto || texto.length > 150) return;
+        const lower = texto.toLowerCase();
+        const esError = palabras.some((p) => {
+          if (p.includes(".*")) return new RegExp(p, "i").test(lower);
+          return lower.includes(p);
+        });
+        if (esError) {
+          const label = fg.querySelector("label");
+          errores.push({ campo: label ? (label.textContent || "").trim() : "Desconocido", texto });
+        }
+      });
+    });
+    return errores;
+  });
+
+  if (erroresValidacion.length > 0) {
+    const detalle = erroresValidacion.map((e) => `  - ${e.campo}: ${e.texto}`).join("\n");
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `El formulario tiene errores de validación:\n${detalle}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  // ─── Seleccionar banco del dropdown ───
+  debugLog.push("9. Seleccionando banco...");
+  const selectoresBanco = [
+    '[name="banco"] .ui-select-toggle',
+    '[name="banco"] .ui-select-match',
+    'input[name="banco"]',
+    'select[name="banco"]',
+    '.ui-select[name="banco"] .ui-select-toggle',
+  ];
+  let bancoAbierto = false;
+  for (const sel of selectoresBanco) {
+    try {
+      await page.waitForSelector(sel, { visible: true, timeout: 4000 });
+      await page.click(sel);
+      bancoAbierto = true;
+      debugLog.push(`  Dropdown banco con selector: ${sel}`);
+      break;
+    } catch { /* siguiente */ }
+  }
+  if (!bancoAbierto) {
+    // Fallback: abrir por posición (primer ui-select-container)
+    const abierto = await page.evaluate(() => {
+      const selects = document.querySelectorAll(".ui-select-container");
+      if (selects.length >= 1) {
+        const toggle = selects[0].querySelector(".ui-select-toggle") as HTMLButtonElement | null;
+        if (toggle && !toggle.disabled) { toggle.click(); return true; }
+      }
+      return false;
+    });
+    if (!abierto) {
+      const screenshot = await page.screenshot({ encoding: "base64" });
+      return {
+        success: false, bank, movements: [],
+        error: "No se pudo encontrar el dropdown de banco.",
+        screenshot: screenshot as string, debug: debugLog.join("\n"),
+      };
+    }
+  }
+  await delay(800);
+
+  // Seleccionar la opción del banco por nombre
+  const nombreBancoNorm = datos.banco.toUpperCase().replace(/\s+/g, " ").trim();
+  const resultadoBanco = await page.evaluate((bancoNorm) => {
+    const opciones = document.querySelectorAll(".ui-select-choices-row");
+    let parcial: { link: HTMLElement; texto: string; indice: number }[] = [];
+    for (let i = 0; i < opciones.length; i++) {
+      const link = opciones[i].querySelector("a");
+      if (!link) continue;
+      const texto = (link.textContent || "").trim();
+      const norm = texto.toUpperCase().replace(/\s+/g, " ").trim();
+      if (norm === bancoNorm) {
+        (link as HTMLElement).click();
+        return { encontrado: true, metodo: "exacto", texto };
+      }
+      if (norm.includes(bancoNorm) || bancoNorm.includes(norm)) {
+        parcial.push({ link: link as HTMLElement, texto, indice: i });
+      }
+    }
+    if (parcial.length > 0) {
+      parcial[0].link.click();
+      return { encontrado: true, metodo: "parcial", texto: parcial[0].texto };
+    }
+    const disponibles = Array.from(opciones).map((op, idx) => {
+      const link = op.querySelector("a");
+      return `[${idx}] "${link ? (link.textContent || "").trim() : "N/A"}"`;
+    });
+    return { encontrado: false, opcionesDisponibles: disponibles };
+  }, nombreBancoNorm);
+
+  if (!resultadoBanco.encontrado) {
+    const disponibles = (resultadoBanco.opcionesDisponibles as string[] || []).slice(0, 8).join(", ");
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se encontró el banco "${datos.banco}" en el dropdown. Opciones: ${disponibles}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+  debugLog.push(`  Banco seleccionado: ${resultadoBanco.texto} (${resultadoBanco.metodo})`);
+  await delay(500);
+
+  // ─── Seleccionar tipo de cuenta (segundo dropdown) ───
+  debugLog.push("10. Seleccionando tipo de cuenta...");
+  const tipoCuentaAbierto = await page.evaluate(() => {
+    const selects = document.querySelectorAll(".ui-select-container");
+    if (selects.length >= 2) {
+      const toggle = selects[1].querySelector(".ui-select-toggle") as HTMLButtonElement | null;
+      if (toggle && !toggle.disabled) { toggle.click(); return true; }
+    }
+    for (const select of selects) {
+      const ul = select.querySelector('ul[repeat*="tipoCtas"], [ng-model*="tipoCtas"]');
+      if (ul) {
+        const toggle = select.querySelector(".ui-select-toggle") as HTMLButtonElement | null;
+        if (toggle && !toggle.disabled) { toggle.click(); return true; }
+      }
+    }
+    return false;
+  });
+  if (!tipoCuentaAbierto) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: "No se pudo encontrar el selector de tipo de cuenta.",
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+  await delay(800);
+
+  const tipoNorm = datos.tipoCuenta.toUpperCase().replace(/\s+/g, " ").trim();
+  const resultadoTipo = await page.evaluate((tipoNormalizado) => {
+    const opciones = document.querySelectorAll(".ui-select-choices-row");
+    for (let i = 0; i < opciones.length; i++) {
+      const link = opciones[i].querySelector("a");
+      if (!link) continue;
+      const texto = (link.textContent || "").trim();
+      const norm = texto.toUpperCase().replace(/\s+/g, " ").trim();
+      if (norm === tipoNormalizado) {
+        (link as HTMLElement).click();
+        return { encontrado: true, texto };
+      }
+    }
+    for (let i = 0; i < opciones.length; i++) {
+      const link = opciones[i].querySelector("a");
+      if (!link) continue;
+      const texto = (link.textContent || "").trim();
+      const norm = texto.toUpperCase().replace(/\s+/g, " ").trim();
+      if (norm.includes(tipoNormalizado) || tipoNormalizado.includes(norm)) {
+        (link as HTMLElement).click();
+        return { encontrado: true, texto, parcial: true };
+      }
+    }
+    return { encontrado: false };
+  }, tipoNorm);
+
+  if (!resultadoTipo.encontrado) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `No se encontró el tipo de cuenta "${datos.tipoCuenta}" en el dropdown.`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+  debugLog.push(`  Tipo de cuenta: ${resultadoTipo.texto}`);
+  await delay(500);
+
+  // ─── Ingresar número de cuenta y validar ───
+  debugLog.push("11. Ingresando número de cuenta...");
+  const validacion: { estado: boolean | null; idTipoCuenta?: number; resuelta: boolean } = {
+    estado: null, resuelta: false,
+  };
+
+  const onResponse = async (response: import("puppeteer-core").HTTPResponse) => {
+    const url = response.url();
+    if (url.includes("validarCuenta") || url.includes("cuenta/validar") || url.includes("validar")) {
+      try {
+        const data = await response.json();
+        if (data && typeof data === "object") {
+          validacion.estado = (data as { estado?: boolean }).estado ?? null;
+          validacion.idTipoCuenta = (data as { idTipoCuenta?: number }).idTipoCuenta;
+        }
+      } catch { /* ignore */ }
+      validacion.resuelta = true;
+    }
+  };
+  page.on("response", onResponse);
+
+  try {
+    await page.click('[name="numCta"]', { clickCount: 3 });
+    await page.keyboard.press("Backspace");
+    await page.type('[name="numCta"]', datos.numeroCuenta, { delay: 0 });
+    await page.keyboard.press("Tab");
+  } catch (err) {
+    page.off("response", onResponse);
+    return {
+      success: false, bank, movements: [],
+      error: `No se pudo ingresar el número de cuenta: ${err instanceof Error ? err.message : String(err)}`,
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  // Esperar validación (máx 8s)
+  const deadline = Date.now() + 8000;
+  while (!validacion.resuelta && Date.now() < deadline) {
+    await delay(500);
+  }
+  page.off("response", onResponse);
+  await delay(1000);
+
+  // Verificar error de cuenta en el DOM
+  const errorCuentaDOM = await page.evaluate(() => {
+    const errorInvalid = document.querySelector('small.invalid[ng-show*="!cuenta.valido"], small.invalid');
+    if (errorInvalid) {
+      const style = window.getComputedStyle(errorInvalid);
+      if (style.display !== "none" && style.visibility !== "hidden") {
+        return (errorInvalid.textContent || "").trim();
+      }
+    }
+    const campo = document.querySelector('[name="numCta"]');
+    if (campo && campo.classList.contains("ng-invalid") && !campo.classList.contains("ng-pristine")) {
+      return "El número de cuenta no es válido";
+    }
+    return null;
+  });
+
+  if (errorCuentaDOM || validacion.estado === false) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: `Número de cuenta inválido: ${errorCuentaDOM || "el servidor rechazó la cuenta"}. Número: ${datos.numeroCuenta}`,
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+  debugLog.push(`  Número de cuenta validado: ${datos.numeroCuenta}`);
+
+  // ─── Autorizar con MiPass ───
+  debugLog.push("12. Autorizando con Mi Pass...");
+  try {
+    await page.waitForSelector(".col-md-12 > .authorize-card-item", { visible: true, timeout: 10000 });
+    await page.click(".col-md-12 > .authorize-card-item");
+  } catch {
+    // Puede no requerir autorización — verificar éxito directamente
+  }
+  await delay(2500);
+  await doSave(page, "09-despues-mipass");
+
+  // ─── Buscar mensaje de éxito ───
+  const mensajeExito = await page.evaluate(() => {
+    const selectores = [
+      ".bch-mensaje-empresas",
+      '[class*="mensaje"]',
+      '[class*="success"]',
+      '[class*="exito"]',
+      ".alert-success",
+    ];
+    for (const selector of selectores) {
+      const elementos = document.querySelectorAll(selector);
+      for (const el of elementos) {
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden") continue;
+        const texto = (el.textContent || "").trim();
+        if (!texto || texto.length > 300) continue;
+        const lower = texto.toLowerCase();
+        if ((lower.includes("beneficiarios agregados exitosamente") ||
+             lower.includes("beneficiario agregado exitosamente") ||
+             (lower.includes("agregados") && lower.includes("exitosamente")) ||
+             (lower.includes("agregado") && lower.includes("exitosamente"))) &&
+            !lower.includes("datos del beneficiario") && !lower.includes("datos de la cuenta")) {
+          return texto;
+        }
+      }
+    }
+    // Buscar en el cuerpo por mensaje de éxito
+    const body = document.body ? document.body.innerText : "";
+    const m = body.match(/beneficiari\w+ agregad\w+ exitosamente/i);
+    return m ? m[0] : null;
+  });
+
+  if (!mensajeExito) {
+    const screenshot = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false, bank, movements: [],
+      error: "No se detectó confirmación de éxito. Puede requerir aprobación MiPass manual o haber fallado. Revisa el screenshot.",
+      screenshot: screenshot as string, debug: debugLog.join("\n"),
+    };
+  }
+
+  debugLog.push(`13. ✅ ${mensajeExito}`);
+  const screenshot = doScreenshots ? (await page.screenshot({ encoding: "base64" })) as string : undefined;
+
+  return {
+    success: true, bank, movements: [],
+    debug: debugLog.join("\n"), screenshot,
+    error: undefined,
+  };
+}
+
 // ─── Main scraper ────────────────────────────────────────────────
 
 async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
-  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful, bankQuery, empresa } = options;
+  const { rut, password, chromePath, saveScreenshots: doScreenshots, headful } = options;
   const bank = "bchile";
-  const isEmpresa = empresa === true;
+
+  // Normalizar scope: si usaron --empresa (deprecated), convertirlo a scope
+  let scope = options.scope;
+  if (!scope) {
+    if (options.empresa) {
+      scope = { type: "business", companyRut: options.bankQuery };
+    }
+  }
+
+  const isEmpresa = scope?.type === "business";
 
   if (!rut || !password) {
     return { success: false, bank, movements: [], error: "Debes proveer RUT y clave." };
@@ -1384,9 +2235,48 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
       Object.defineProperty(navigator, "webdriver", { get: () => false });
     });
 
+    // Acciones: listar cuentas / listar beneficiarios / agregar beneficiario
+    if (options.action === "listar-cuentas") {
+      // Empresas: listar cuentas de la empresa
+      if (isEmpresa) {
+        return await listarCuentasEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
+      }
+      // Personas: listar todas las cuentas del cliente
+      return await listarCuentasPersonal(page, rut, password, debugLog, doSave);
+    }
+
+    if (options.action === "listar-beneficiarios") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "listar-beneficiarios" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      return await listarBeneficiariosEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
+    }
+
+    if (options.action === "agregar-beneficiario") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "agregar-beneficiario" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      if (!options.beneficiario) {
+        return {
+          success: false, bank, movements: [],
+          error: "Faltan datos del beneficiario. Usa --beneficiario-rut, --beneficiario-nombre, --beneficiario-banco, --beneficiario-cuenta, --beneficiario-tipo.",
+          debug: debugLog.join("\n"),
+        };
+      }
+      return await agregarBeneficiario(page, rut, password, scope?.companyRut ?? null, options.beneficiario, debugLog, doSave, !!doScreenshots);
+    }
+
     // ─── Flujo Empresa ─────────────────────────────────────────────
     if (isEmpresa) {
-      return await scrapeEmpresa(page, rut, password, bankQuery ?? null, debugLog, doSave, !!doScreenshots);
+      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots);
     }
 
     // ─── Flujo Personas (existente) ─────────────────────────────────
