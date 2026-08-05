@@ -77,11 +77,37 @@ export async function saveScreenshot(
   const safeName = name.replace(/[/\\:*?"<>|]/g, "_");
   const dir = path.resolve("screenshots");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  await page.screenshot({
-    path: path.join(dir, `${safeName}.png`),
-    fullPage: true,
-  });
-  debugLog.push(`  Screenshot saved: screenshots/${safeName}.png`);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // After OAuth redirects the viewport can briefly be 0×0
+      const vp = page.viewport();
+      if (!vp || vp.width < 1 || vp.height < 1) {
+        await page.setViewport({ width: 1280, height: 900 });
+        await delay(500);
+      }
+      await page.screenshot({
+        path: path.join(dir, `${safeName}.png`),
+        fullPage: true,
+      });
+      debugLog.push(`  Screenshot saved: screenshots/${safeName}.png`);
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/0 width|0 height|Cannot take screenshot|Execution context was destroyed|detached Frame/i.test(msg)) {
+        try {
+          await page.setViewport({ width: 1280, height: 900 });
+        } catch {
+          /* ignore */
+        }
+        await delay(1000 * (attempt + 1));
+        continue;
+      }
+      debugLog.push(`  Screenshot skipped (${safeName}): ${msg}`);
+      return;
+    }
+  }
+  debugLog.push(`  Screenshot skipped (${safeName}): viewport/navigation unstable`);
 }
 
 /** Cierra popups y modales genéricos */
@@ -154,13 +180,21 @@ export function normalizeDate(raw: string): string {
     return `${day}-${month}-${new Date().getFullYear()}`;
   }
 
-  // "9 mar 2026" (día mes_texto año)
+  // "9 mar 2026" / "03 Ago, 2026" (día mes_texto[, ] año)
+  const monthText = value.match(/^(\d{1,2})\s+([A-Za-zÁÉÍÓÚáéíóú]+),?\s+(\d{4})$/);
+  if (monthText) {
+    const key = monthText[2].toLowerCase().replace(/,$/, "").slice(0, 3);
+    if (MONTHS_MAP[key]) {
+      return `${monthText[1].padStart(2, "0")}-${MONTHS_MAP[key]}-${monthText[3]}`;
+    }
+  }
+
   const parts = value.split(/\s+/);
   if (parts.length >= 2) {
-    const monthKey = parts.length === 3 ? parts[1].toLowerCase() : parts[0].toLowerCase();
+    const monthKey = (parts.length === 3 ? parts[1] : parts[0]).toLowerCase().replace(/,$/, "").slice(0, 3);
     if (MONTHS_MAP[monthKey]) {
       if (parts.length === 3) {
-        return `${parts[0].padStart(2, "0")}-${MONTHS_MAP[monthKey]}-${parts[2]}`;
+        return `${parts[0].padStart(2, "0")}-${MONTHS_MAP[monthKey]}-${parts[2].replace(/,$/, "")}`;
       }
       const dayPart = parts.find((p) => /^\d{1,2}$/.test(p));
       if (dayPart) {
