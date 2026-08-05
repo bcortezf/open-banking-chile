@@ -6,16 +6,39 @@ import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { fillRut, fillPassword, clickSubmit, detectLoginError } from "../actions/login.js";
 import { dismissBanners } from "../actions/navigation.js";
+import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
 
 // ─── Scotiabank-specific constants ───────────────────────────────
 
 const BANK_URL = "https://www.scotiabank.cl";
+const EMPRESA_LOGIN_URL = "https://appservtrx.scotiabank.cl/portalempresas/login";
 
 const LOGIN_SELECTORS = {
   rutSelectors: ["#inputDni", 'input[name="inputDni"]', 'input[id*="Dni"]', 'input[name*="Dni"]'],
   passwordSelectors: ["#inputPassword", 'input[name="inputPassword"]', 'input[id*="Password"]', 'input[name*="Password"]'],
   rutFormat: "dash" as const,
 };
+
+const EMPRESA_2FA_CONFIG = {
+  timeoutEnvVar: "SCOTIABANK_2FA_TIMEOUT_SEC",
+  defaultTimeoutSec: 180,
+  keywords: [
+    "clave dinámica",
+    "clave dinamica",
+    "scotiapass",
+    "segundo factor",
+    "aprueba la operación",
+    "autoriza en",
+    "desafío",
+    "desafio",
+  ],
+};
+
+function formatRutDash(rut: string): string {
+  const clean = rut.replace(/[^0-9kK]/g, "").toUpperCase();
+  if (clean.length < 2) return clean;
+  return `${clean.slice(0, -1)}-${clean.slice(-1)}`;
+}
 
 // ─── Shadow DOM helper ───────────────────────────────────────────
 
@@ -321,6 +344,551 @@ async function fillAndSubmitDateRange(page: Page, startDate: string, endDate: st
 // ─── Main scrape function ────────────────────────────────────────
 
 async function scrapeScotiabank(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
+  const scope = options.scope ?? (options.empresa ? { type: "business" as const, companyRut: options.bankQuery } : undefined);
+  if (scope?.type === "business") {
+    return scrapeScotiabankEmpresas(session, options, scope.companyRut);
+  }
+  return scrapeScotiabankPersonas(session, options);
+}
+
+/** Portal Empresas — login smoke + MFA; extraction WIP after we map the home DOM. */
+async function scrapeScotiabankEmpresas(
+  session: BrowserSession,
+  options: ScraperOptions,
+  companyRut: string | undefined,
+): Promise<ScrapeResult> {
+  const { rut, password, saveScreenshots: doScreenshots, onProgress } = options;
+  const { page, debugLog, screenshot: doSave } = session;
+  const progress = onProgress || (() => {});
+  const bank = "scotiabank";
+
+  const rawEmpresa =
+    companyRut ||
+    process.env.SCOTIABANK_EMPRESA_RUT ||
+    process.env.SCOTIABANK_COMPANY_RUT;
+  // Ignore placeholder typos like "RUT_EMPRESA" (no digits) and fall back to .env
+  const empresaRut =
+    rawEmpresa && /\d/.test(rawEmpresa)
+      ? rawEmpresa
+      : process.env.SCOTIABANK_EMPRESA_RUT || process.env.SCOTIABANK_COMPANY_RUT;
+  if (!empresaRut || !/\d/.test(empresaRut)) {
+    return {
+      success: false,
+      bank,
+      accounts: [],
+      error:
+        "Scotia Empresas requiere RUT empresa real: --scope business:78053686-1 o SCOTIABANK_EMPRESA_RUT en .env",
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  debugLog.push("1. [Empresas] Navigating to Portal Empresas login...");
+  progress("Abriendo Portal Empresas...");
+  await page.goto(EMPRESA_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await delay(4000);
+
+  try {
+    await page.waitForSelector(
+      "#login-business-content-card-form-input-dni-business-input, input[name='bussinessId'], input[placeholder*='Empresa']",
+      { visible: true, timeout: 30000 },
+    );
+  } catch {
+    const ss = await page.screenshot({ encoding: "base64" });
+    return {
+      success: false,
+      bank,
+      accounts: [],
+      error: "No se cargó el formulario Portal Empresas (RUT Empresa).",
+      screenshot: ss as string,
+      debug: debugLog.join("\n"),
+    };
+  }
+  await doSave(page, "01-empresa-login");
+  debugLog.push(`  Login URL: ${page.url()}`);
+
+  const empresaFmt = formatRutDash(empresaRut);
+  const userFmt = formatRutDash(rut);
+
+  const empresaSel = "#login-business-content-card-form-input-dni-business-input";
+  const userSel = "#login-business-content-card-form-input-dni-input";
+  const passSel = "#login-business-content-card-form-input-password-input";
+
+  debugLog.push(`2. [Empresas] Filling RUT Empresa (${empresaFmt})...`);
+  progress("Ingresando RUT empresa...");
+  const empresaInput = await page.$(empresaSel) || await page.$("input[name='bussinessId']");
+  if (!empresaInput) {
+    const ss = await page.screenshot({ encoding: "base64" });
+    return { success: false, bank, accounts: [], error: "No se encontró RUT Empresa", screenshot: ss as string, debug: debugLog.join("\n") };
+  }
+  await empresaInput.click({ clickCount: 3 });
+  await empresaInput.type(empresaFmt, { delay: 50 });
+
+  debugLog.push(`3. [Empresas] Filling RUT Usuario (${userFmt})...`);
+  progress("Ingresando RUT usuario...");
+  const userInput = await page.$(userSel) || await page.$("input[name='userId']");
+  if (!userInput) {
+    const ss = await page.screenshot({ encoding: "base64" });
+    return { success: false, bank, accounts: [], error: "No se encontró RUT Usuario", screenshot: ss as string, debug: debugLog.join("\n") };
+  }
+  await userInput.click({ clickCount: 3 });
+  await userInput.type(userFmt, { delay: 50 });
+
+  debugLog.push("4. [Empresas] Filling Clave...");
+  progress("Ingresando clave...");
+  const passInput = await page.$(passSel) || await page.$("input[name='pass']");
+  if (!passInput) {
+    const ss = await page.screenshot({ encoding: "base64" });
+    return { success: false, bank, accounts: [], error: "No se encontró Clave", screenshot: ss as string, debug: debugLog.join("\n") };
+  }
+  await passInput.click({ clickCount: 3 });
+  await passInput.type(password, { delay: 50 });
+  await doSave(page, "02-empresa-credentials");
+
+  // Login gate is captcha (no ScotiaPass on entry).
+  // ponytail: never auto-fill captcha — DOM/OCR guesses the wrong/stale code.
+  if (await hasEmpresaCaptcha(page)) {
+    debugLog.push("5. [Empresas] Captcha detectado — completar manualmente en Chrome...");
+    await doSave(page, "02b-empresa-captcha");
+    progress("Escribe el captcha actual y pulsa Ingresar en Chrome...");
+    const left = await waitUntilNotLogin(page, debugLog, EMPRESA_2FA_CONFIG);
+    if (!left) {
+      const ss = await page.screenshot({ encoding: "base64" }).catch(() => undefined);
+      return {
+        success: false,
+        bank,
+        accounts: [],
+        error: "Timeout en captcha/login Empresas (escribe el captcha e Ingresar en Chrome).",
+        screenshot: ss as string | undefined,
+        debug: debugLog.join("\n"),
+      };
+    }
+    // OAuth redirect → /portalempresas/home; wait for layout before screenshots
+    await settleEmpresaHome(page, debugLog);
+  } else {
+    debugLog.push("5. [Empresas] Submitting (sin captcha)...");
+    progress("Iniciando sesión...");
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll("button")).find(
+        (b) => (b.innerText || "").trim().toLowerCase() === "ingresar",
+      ) as HTMLButtonElement | undefined;
+      if (btn && !btn.disabled) btn.click();
+    });
+    await delay(5000);
+  }
+  await doSave(page, "03-empresa-after-submit");
+
+  // Optional post-login challenge (user reports login itself has no ScotiaPass)
+  if ((await detect2FA(page, EMPRESA_2FA_CONFIG)) || (await looksLikeEmpresaMfa(page))) {
+    debugLog.push("6. [Empresas] Challenge extra detectado (no esperado en login)...");
+    progress("Completa el challenge en Chrome si aparece...");
+    await waitFor2FA(page, debugLog, EMPRESA_2FA_CONFIG);
+  }
+  if (/mfe-login|portalempresas\/login/i.test(page.url())) {
+    const left = await waitUntilNotLogin(page, debugLog, EMPRESA_2FA_CONFIG);
+    if (!left) {
+      return {
+        success: false,
+        bank,
+        accounts: [],
+        error: "Sigue en login Empresas tras captcha — revisa credenciales/captcha.",
+        debug: debugLog.join("\n"),
+      };
+    }
+    await settleEmpresaHome(page, debugLog);
+  }
+
+  await closePopups(page);
+  await doSave(page, "04-empresa-after-login");
+
+  if (/mfe-login|portalempresas\/login/i.test(page.url())) {
+    const err = await page.evaluate(() => {
+      const text = (document.body?.innerText || "").toLowerCase();
+      if (/clave|rut|incorrect|inválid|bloque|error|intent/.test(text)) {
+        const lines = (document.body?.innerText || "").split("\n").map((l) => l.trim()).filter(Boolean);
+        return lines.find((l) => /clave|rut|incorrect|inválid|bloque|error/i.test(l) && l.length < 160) || null;
+      }
+      return null;
+    }).catch(() => null);
+    return {
+      success: false,
+      bank,
+      accounts: [],
+      error: err || `Login Empresas no completó (URL: ${page.url()})`,
+      debug: debugLog.join("\n"),
+    };
+  }
+
+  debugLog.push(`  Login OK — URL: ${page.url()}`);
+  progress("Sesión Empresas iniciada");
+  await settleEmpresaHome(page, debugLog);
+  await doSave(page, "05-empresa-dashboard");
+
+  debugLog.push("7. [Empresas] Abriendo Cuentas...");
+  progress("Navegando a Cuentas...");
+  const clickedCuentas = await clickEmpresaNav(page, /^cuentas$/i);
+  if (!clickedCuentas) {
+    debugLog.push("  No se encontró menú 'Cuentas'");
+  } else {
+    debugLog.push(`  Clicked nav: ${clickedCuentas}`);
+    await delay(4000);
+    await settleEmpresaHome(page, debugLog);
+  }
+  await doSave(page, "06-empresa-cuentas");
+  debugLog.push(`  Cuentas URL: ${page.url()}`);
+
+  const cuentasMap = await page.evaluate(() => {
+    const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+    return { snippet: text.slice(0, 900) };
+  }).catch(() => ({ snippet: "" }));
+  debugLog.push(`  Cuentas snippet: ${cuentasMap.snippet}`);
+
+  // Capture account cards on /products before drilling into a row
+  let accounts = await extractEmpresaAccountsPage(page);
+  debugLog.push(`  Accounts on products: ${accounts.length}`);
+  for (const a of accounts) debugLog.push(`    - ${a.label}: ${a.balance ?? "?"}`);
+
+  // Select Cuenta Corriente so "Últimos movimientos" loads that account's rows
+  const sub = await clickEmpresaNav(page, /cuenta corriente\s*\(/i);
+  if (sub) {
+    debugLog.push(`  Selected account: ${sub}`);
+    await delay(3500);
+  }
+
+  const tab = await clickEmpresaNav(page, /^[úu]ltimos movimientos$/i);
+  if (tab) {
+    debugLog.push(`  Tab: ${tab}`);
+    await delay(2000);
+  }
+
+  // Wait until movement rows render (do NOT click global icon-arrow — leaves Cuentas)
+  await waitForEmpresaMovements(page, debugLog);
+  await doSave(page, "07-empresa-cuenta-detalle");
+
+  // Re-read accounts if first pass missed (DOM may hydrate late)
+  if (accounts.length === 0) {
+    accounts = await extractEmpresaAccountsPage(page);
+    debugLog.push(`  Accounts retry: ${accounts.length}`);
+  }
+
+  const bodyText = await page.evaluate(() => (document.body?.innerText || "").replace(/\u00a0/g, " "));
+  if (/no se encontraron registros/i.test(bodyText)) {
+    debugLog.push("  Aviso UI: 'No se encontraron registros' en movimientos");
+  }
+  await doSave(page, "07b-empresa-movimientos");
+  type RawMov = { date: string; description: string; amount: string; balance: string; tipo: string };
+  const fromText = parseEmpresaMovementsText(bodyText).map((r: RawMov) => {
+    let amount = parseChileanAmount(r.amount);
+    if (r.tipo === "cargo") amount = -Math.abs(amount);
+    else amount = Math.abs(amount);
+    return {
+      date: normalizeDate(r.date),
+      description: r.description || "Movimiento",
+      amount,
+      balance: r.balance ? parseChileanAmount(r.balance) : 0,
+      source: MOVEMENT_SOURCE.account,
+    } satisfies BankMovement;
+  }).filter((m: BankMovement) => m.amount !== 0);
+  const movs = deduplicateMovements([
+    ...await extractEmpresaMovements(page),
+    ...fromText,
+  ]);
+  debugLog.push(`  Movements on page: ${movs.length}`);
+
+  const clpIdx = accounts.findIndex((a) => /corriente|vista|ahorro/i.test(a.label) && !/d[oó]lar/i.test(a.label));
+  const attachIdx = clpIdx >= 0 ? clpIdx : 0;
+  if (accounts.length > 0) {
+    accounts = accounts.map((a, i) => (i === attachIdx ? { ...a, movements: movs } : a));
+  } else if (movs.length > 0) {
+    accounts = [{ label: "Cuenta Corriente", movements: movs }];
+  }
+
+  progress(`Listo — ${accounts.length} cuentas, ${movs.length} movimientos`);
+  await doSave(page, "08-empresa-final");
+  let ss: string | undefined;
+  if (doScreenshots) {
+    try {
+      ss = (await page.screenshot({ encoding: "base64", fullPage: true })) as string;
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  return {
+    success: true,
+    bank,
+    accounts: accounts.length ? accounts : [{ label: "Scotia Empresas (WIP)", movements: [] }],
+    screenshot: ss,
+    debug: debugLog.join("\n"),
+  };
+}
+
+async function clickEmpresaNav(page: Page, label: RegExp): Promise<string | null> {
+  return page.evaluate((patternSrc) => {
+    const re = new RegExp(patternSrc, "i");
+    const candidates = Array.from(document.querySelectorAll("a, button, [role='tab'], [role='menuitem'], span, li, div"));
+    for (const el of candidates) {
+      const t = ((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+      if (!t || t.length > 60) continue;
+      if (!re.test(t)) continue;
+      // Prefer top-nav / menu items (not huge blocks)
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (rect.height > 80) continue;
+      (el as HTMLElement).click();
+      return t;
+    }
+    return null;
+  }, label.source);
+}
+
+async function extractEmpresaAccountsPage(
+  page: Page,
+): Promise<Array<{ label: string; balance?: number; movements: BankMovement[] }>> {
+  const body = await page.evaluate(() => (document.body?.innerText || "").replace(/\u00a0/g, " "));
+  return parseEmpresaAccountsText(body);
+}
+
+/** Pure parser for /products account cards. */
+export function parseEmpresaAccountsText(
+  text: string,
+): Array<{ label: string; balance?: number; movements: BankMovement[] }> {
+  const normalized = text.replace(/\u00a0/g, " ");
+  const out: Array<{ label: string; balance?: number; movements: BankMovement[] }> = [];
+  const seen = new Set<string>();
+  const re =
+    /(Cuenta\s+Corriente|Cuenta\s+Vista|Cuenta\s+D[oó]lar|Cuenta\s+de\s+Ahorro)\s*\(([^)]+)\)\s*(?:\$|USD)\s*([\d.]+(?:,\d{1,2})?)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(normalized)) !== null) {
+    const label = `${m[1]} (${m[2]})`.replace(/\s+/g, " ").trim();
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push({ label, balance: parseChileanAmount(m[3]), movements: [] });
+  }
+  return out.slice(0, 10);
+}
+
+async function expandEmpresaMovementRows(page: Page, debugLog: string[]): Promise<void> {
+  // Scoped only under Últimos movimientos — global .icon-arrow-1-right navigates away (Inicio).
+  const n = await page.evaluate(() => {
+    const root =
+      Array.from(document.querySelectorAll("section, div, main")).find((el) =>
+        /[úu]ltimos movimientos/i.test((el as HTMLElement).innerText || ""),
+      ) || document.body;
+    const arrows = Array.from(
+      root.querySelectorAll("table span.icon-arrow-1-right, table .icon-arrow-1-right, tbody .icon-arrow-1-right"),
+    );
+    let clicked = 0;
+    for (const el of arrows.slice(0, 30)) {
+      try {
+        (el as HTMLElement).click();
+        clicked++;
+      } catch {
+        /* ignore */
+      }
+    }
+    return clicked;
+  }).catch(() => 0);
+  debugLog.push(`  Expanded movement rows via arrow: ${n}`);
+}
+
+async function waitForEmpresaMovements(page: Page, debugLog: string[]): Promise<void> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const t = document.body?.innerText || "";
+        if (/no se encontraron registros/i.test(t) && !/TEF\s+\d/i.test(t)) return false;
+        return (
+          /\d{1,2}\s+(Ene|Feb|Mar|Abr|May|Jun|Jul|Ago|Sep|Oct|Nov|Dic)[a-z]*,?\s+\d{4}/i.test(t) &&
+          /\$\s*[\d.]+/.test(t) &&
+          /N[°º]?\s*OPERACI/i.test(t)
+        );
+      },
+      { timeout: 20000 },
+    );
+    debugLog.push("  Movements table visible");
+  } catch {
+    debugLog.push("  Timeout esperando filas de movimientos — sigo igual");
+  }
+  await delay(1000);
+}
+
+/**
+ * Parse Scotia Emp "Últimos movimientos" text.
+ * Avoid matching RUT digits (e.g. 78334698-2) as Nº operación — ops are 10+ digits without hyphen.
+ */
+export function parseEmpresaMovementsText(text: string): Array<{
+  date: string;
+  description: string;
+  amount: string;
+  balance: string;
+  tipo: string;
+}> {
+  const full = text.replace(/\u00a0/g, " ");
+  const start = full.search(/[Úú]ltimos movimientos/i);
+  const chunk = start >= 0 ? full.slice(start) : full;
+  const out: Array<{ date: string; description: string; amount: string; balance: string; tipo: string }> = [];
+  const tipoFromMonto = (monto: string) =>
+    /^-|−|–/.test(monto.trim()) || monto.includes("-$") ? "cargo" : "abono";
+
+  const rowRe =
+    /(\d{1,2}\s+[A-Za-zÁÉÍÓÚáéíóú]{3},?\s+\d{4})\s+(.+?)\s+(\d{9,})(?!-\d)\s+([+\-−–]?\$\s*[\d.]+(?:,\d{1,2})?)\s+(\$\s*[\d.]+(?:,\d{1,2})?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = rowRe.exec(chunk)) !== null) {
+    const desc = m[2].replace(/\s+/g, " ").trim();
+    if (/^(FECHA|DESCRIPCI|MONTO|SALDO)/i.test(desc)) continue;
+    out.push({
+      date: m[1],
+      description: desc,
+      amount: m[4],
+      balance: m[5],
+      tipo: tipoFromMonto(m[4]),
+    });
+  }
+  return out;
+}
+
+async function extractEmpresaMovements(page: Page): Promise<BankMovement[]> {
+  const raw = await page.evaluate(() => {
+    const results: Array<{ date: string; description: string; amount: string; balance: string; tipo: string }> = [];
+    const looksLikeDate = (s: string) =>
+      /\d{1,2}\s+[A-Za-zÁÉÍÓÚáéíóú]{3},?\s+\d{4}/.test(s) || /\d{1,2}[\/\-.]\d{1,2}/.test(s);
+    const tipoFromMonto = (monto: string) =>
+      /^-|−|–/.test(monto.trim()) || monto.includes("-$") ? "cargo" : "abono";
+
+    for (const table of Array.from(document.querySelectorAll("table"))) {
+      const rows = Array.from(table.querySelectorAll("tr"));
+      let dateIdx = -1, descIdx = -1, amountIdx = -1, saldoIdx = -1;
+      for (const row of rows) {
+        const cells = row.querySelectorAll("th, td");
+        if (cells.length < 2) continue;
+        const headers = Array.from(cells).map((c) => ((c as HTMLElement).innerText || "").trim().toLowerCase());
+        if (!headers.some((h) => h.includes("fecha"))) continue;
+        dateIdx = headers.findIndex((h) => h.includes("fecha"));
+        descIdx = headers.findIndex((h) => /descrip|detalle|glosa/.test(h));
+        saldoIdx = headers.findIndex((h) => h.includes("saldo"));
+        amountIdx = headers.findIndex((h) => /monto|importe/.test(h));
+        break;
+      }
+      if (dateIdx < 0 || amountIdx < 0) continue;
+      for (const row of rows) {
+        const vals = Array.from(row.querySelectorAll("td")).map((c) =>
+          ((c as HTMLElement).innerText || "").replace(/\s+/g, " ").trim(),
+        );
+        if (vals.length < 3) continue;
+        const date = vals[dateIdx] || "";
+        if (!looksLikeDate(date)) continue;
+        const amount = vals[amountIdx] || "";
+        if (!/\$/.test(amount)) continue;
+        results.push({
+          date,
+          description: descIdx >= 0 ? vals[descIdx] || "" : vals[1] || "",
+          amount,
+          balance: saldoIdx >= 0 ? vals[saldoIdx] || "" : "",
+          tipo: tipoFromMonto(amount),
+        });
+      }
+    }
+    return results;
+  });
+
+  return raw
+    .map((r) => {
+      let amount = parseChileanAmount(r.amount);
+      if (r.tipo === "cargo") amount = -Math.abs(amount);
+      else amount = Math.abs(amount);
+      if (!amount) return null;
+      return {
+        date: normalizeDate(r.date),
+        description: r.description || "Movimiento",
+        amount,
+        balance: r.balance ? parseChileanAmount(r.balance) : 0,
+        source: MOVEMENT_SOURCE.account,
+      } satisfies BankMovement;
+    })
+    .filter(Boolean) as BankMovement[];
+}
+
+async function settleEmpresaHome(page: Page, debugLog: string[]): Promise<void> {
+  try {
+    await page.setViewport({ width: 1280, height: 900 });
+  } catch {
+    /* ignore */
+  }
+  try {
+    await page.waitForFunction(
+      () => document.readyState === "complete" && (document.body?.innerText || "").length > 50,
+      { timeout: 20000 },
+    );
+  } catch {
+    debugLog.push("  Home aún cargando (timeout waitForFunction) — sigo igual");
+  }
+  await delay(2500);
+}
+
+async function hasEmpresaCaptcha(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const input = document.querySelector(
+      'input[placeholder*="captcha" i], input[name*="captcha" i], input[id*="captcha" i]',
+    );
+    if (input) return true;
+    const text = (document.body?.innerText || "").toLowerCase();
+    return text.includes("ingrese captcha") || text.includes("ingresa captcha");
+  });
+}
+
+async function looksLikeEmpresaMfa(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    // Still on login form with password → not MFA yet
+    if (document.querySelector("#login-business-content-card-form-input-password-input")) return false;
+    const text = (document.body?.innerText || "").toLowerCase();
+    return /scotiapass|clave din[aá]mica|aprueba la|autoriza en|desaf[ií]o/.test(text);
+  });
+}
+
+async function waitUntilNotLogin(
+  page: Page,
+  debugLog: string[],
+  config: { timeoutEnvVar?: string; defaultTimeoutSec?: number },
+): Promise<boolean> {
+  const envValue = config.timeoutEnvVar ? process.env[config.timeoutEnvVar] : undefined;
+  const timeoutSec = Math.min(
+    600,
+    Math.max(30, parseInt(envValue || String(config.defaultTimeoutSec || 180), 10) || 180),
+  );
+  const start = Date.now();
+  while ((Date.now() - start) / 1000 < timeoutSec) {
+    try {
+      const url = page.url();
+      // Login gate = stay on mfe-login / portalempresas. URL change = success.
+      if (!/mfe-login|portalempresas\/login/i.test(url)) {
+        debugLog.push(`  Fuera del login Empresas — URL: ${url}`);
+        return true;
+      }
+      await delay(1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Expected while Chrome navigates after captcha / Ingresar
+      if (/Execution context was destroyed|detached Frame|Target closed|Navigation|net::ERR/i.test(msg)) {
+        await delay(2000);
+        try {
+          const url = page.url();
+          if (!/mfe-login|portalempresas\/login/i.test(url)) {
+            debugLog.push(`  Fuera del login Empresas (post-nav) — URL: ${url}`);
+            return true;
+          }
+        } catch {
+          /* still navigating */
+        }
+        continue;
+      }
+      throw err;
+    }
+  }
+  debugLog.push(`  Timeout esperando salida de login Empresas (${timeoutSec}s).`);
+  return false;
+}
+
+async function scrapeScotiabankPersonas(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
   const { rut, password, saveScreenshots: doScreenshots, onProgress } = options;
   const { page, debugLog, screenshot: doSave } = session;
   const progress = onProgress || (() => {});
@@ -696,7 +1264,10 @@ const scotiabank: BankScraper = {
   id: "scotiabank",
   name: "Scotiabank Chile",
   url: BANK_URL,
-  scrape: (options) => runScraper("scotiabank", options, {}, scrapeScotiabank),
+  scrape: (options) => {
+    const isBiz = options.scope?.type === "business" || !!options.empresa;
+    return runScraper("scotiabank", options, { forceHeadful: isBiz }, scrapeScotiabank);
+  },
 };
 
 export default scotiabank;

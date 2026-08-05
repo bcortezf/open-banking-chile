@@ -37,7 +37,7 @@ Este proyecto opera con **revisión por pares**. Cada cambio debe ser probado y 
 | Banco BICE | `bice` | ✅ |
 | Santander | `santander` | ✅ |
 | Banco Edwards | `edwards` | ✅ |
-| Scotiabank | `scotiabank` | ✅ |
+| Scotiabank (personas + empresas) | `scotiabank` | ✅ |
 | Banco de Chile (personas + empresas) | `bchile` | ✅ |
 | BCI | `bci` | ✅ |
 | Itaú | `itau` | ✅ |
@@ -111,6 +111,7 @@ node dist/cli.js --bank falabella --headful --pretty
 | `--owner <T\|A\|B>` | Filtro Titular/Adicional para TC (default: B = todos) |
 | `--empresa` | [BCHILE] Usar portal empresas |
 | `--bankQuery <RUT>` | [BCHILE] RUT empresa a consultar |
+| `--scope business[:RUT]` | [SCOTIABANK] Portal Empresas (RUT empresa; o `SCOTIABANK_EMPRESA_RUT`) |
 
 ### Como librería
 
@@ -235,7 +236,7 @@ src/
     edwards.ts          — Banco Edwards
     itau.ts             — Itaú
     santander.ts        — Banco Santander
-    scotiabank.ts       — Scotiabank Chile
+    scotiabank.ts       — Scotiabank Chile (personas + empresas)
     bancosecurity.ts    — Banco Security
 ```
 
