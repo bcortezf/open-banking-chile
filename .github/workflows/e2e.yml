@@ -1,0 +1,51 @@
+name: 🏦 E2E Banco Real (aprobación requerida)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# ⚠️ Este workflow usa credenciales bancarias REALES (GitHub Secrets).
+# Corre SOLO cuando un mantenedor aprueba el Environment "e2e".
+# Los secrets están cifrados: solo el admin puede ver/editar sus valores.
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Tests E2E con cuentas reales
+    runs-on: ubuntu-latest
+    environment: e2e
+    if: github.actor != 'dependabot[bot]'
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🏗️ Build
+        run: npm run build
+
+      - name: 🏦 Run E2E tests (BCHILE)
+        env:
+          BCHILE_RUT: ${{ secrets.BCHILE_RUT }}
+          BCHILE_PASS: ${{ secrets.BCHILE_PASS }}
+          # Timeout generoso para aprobar 2FA manualmente si aplica
+          BCHILE_2FA_TIMEOUT_SEC: "300"
+        run: npx vitest run src/e2e.test.ts
+
+      - name: 🏦 Run E2E tests (BANCO_2 — opcional)
+        if: env.OTRO_RUT != ''
+        env:
+          OTRO_RUT: ${{ secrets.OTRO_BANCO_RUT }}
+          OTRO_PASS: ${{ secrets.OTRO_BANCO_PASS }}
+        run: |
+          echo "Configura más bancos agregando sus secrets y jobs E2E"

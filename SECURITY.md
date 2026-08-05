@@ -29,10 +29,43 @@ Si encuentras una vulnerabilidad de seguridad en este proyecto:
 Cada Pull Request pasa por:
 
 1. **🤖 AI Review automático** (DeepSeek) — detecta credenciales, malware, exfiltración
-2. **👀 Revisión humana** — miembros de la comunidad revisan el código
-3. **🧪 Prueba funcional** — con cuenta bancaria real (obligatorio para scrapers)
+2. **🧪 CI automático** — `npm test` (unitarios con mocks) + `npm run build` en cada PR
+3. **🏦 E2E con cuenta bancaria real** — SOLO tras aprobación manual de un mantenedor (Environment `e2e`)
+4. **👀 Revisión humana** — miembros de la comunidad revisan el código
 
 Si la IA detecta algo sospechoso, el PR se marca con `⚠️ Security Review` y un mantenedor revisa manualmente.
+
+## 🔐 Credenciales bancarias en CI (GitHub Secrets)
+
+El flujo E2E usa **credenciales bancarias reales** que viven como **GitHub Secrets** del repo:
+
+- 🔒 **Solo el admin** puede ver/editar los secrets (Settings → Secrets and variables → Actions)
+- 🕵️ Los mantenedores ven el *nombre* del secret pero **nunca su valor**
+- 🚦 El workflow `e2e.yml` usa el **Environment "e2e"** con *required reviewers*: el runner **ni arranca** hasta que un mantenedor aprueba el deployment
+- 🧾 GitHub enmascara automáticamente los valores en los logs (nunca se imprimen)
+- ⏱️ El test E2E incluye un test que **verifica que las credenciales no aparezcan en el output**
+
+### Secrets necesarios
+
+| Secret | Banco | Ejemplo |
+|--------|-------|---------|
+| `BCHILE_RUT` | Banco de Chile | `20020177-9` |
+| `BCHILE_PASS` | Banco de Chile | `tu_clave` |
+| `DEEPSEEK_API_KEY` | AI Review | `sk-...` |
+
+> Para agregar más bancos: agrega sus secrets y un job en `e2e.yml`.
+
+### Flujo de aprobación
+
+```
+PR abierto → CI básico + AI Review (auto)
+     ↓
+Mantenedor revisa el código
+     ↓
+Aprueba el Environment "e2e" (botón "Review deployments")
+     ↓
+Corren los tests E2E con credenciales reales
+```
 
 ## Buenas prácticas
 
