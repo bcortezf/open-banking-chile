@@ -40,7 +40,9 @@ jobs:
           python .github/scripts/ai_review.py
 
       - name: 🏷️ Label PR (if applicable)
-        if: always() && github.event_name == 'pull_request'
+        # Solo etiquetar PRs del mismo repo. En PRs de forks el GITHUB_TOKEN es
+        # de solo lectura → no puede agregar labels → el job fallaría en vano.
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -50,8 +52,8 @@ jobs:
           # Create labels if they don't exist, then add
           if [ "$AI_VERDICT" = "failure" ]; then
             gh label create "security-review" --color "d73a4a" --repo $REPO 2>/dev/null || true
-            gh pr edit $PR_NUMBER --add-label "security-review" --repo $REPO
+            gh pr edit $PR_NUMBER --add-label "security-review" --repo $REPO || true
           else
             gh label create "ai-reviewed" --color "0e8a16" --repo $REPO 2>/dev/null || true
-            gh pr edit $PR_NUMBER --add-label "ai-reviewed" --repo $REPO
+            gh pr edit $PR_NUMBER --add-label "ai-reviewed" --repo $REPO || true
           fi
