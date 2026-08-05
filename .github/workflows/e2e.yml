@@ -7,16 +7,23 @@ on:
 # ⚠️ Este workflow usa credenciales bancarias REALES (GitHub Secrets).
 # Corre SOLO cuando un mantenedor aprueba el Environment "e2e".
 # Los secrets están cifrados: solo el admin puede ver/editar sus valores.
+#
+# Cada banco corre en un job paralelo (matrix) con Chrome aislado.
+# fail-fast: false → si falla uno, el otro igual termina.
 
 permissions:
   contents: read
 
 jobs:
   e2e:
-    name: Tests E2E con cuentas reales
+    name: E2E ${{ matrix.bank }}
     runs-on: ubuntu-latest
     environment: e2e
     if: github.actor != 'dependabot[bot]'
+    strategy:
+      fail-fast: false
+      matrix:
+        bank: [bchile, falabella]
 
     steps:
       - name: 📥 Checkout
@@ -34,9 +41,9 @@ jobs:
       - name: 🏗️ Build
         run: npm run build
 
-      - name: 🏦 Run E2E tests (bchile + falabella)
+      - name: 🏦 Run E2E (${{ matrix.bank }})
         env:
-          E2E_BANKS: bchile,falabella
+          E2E_BANKS: ${{ matrix.bank }}
           BCHILE_RUT: ${{ secrets.BCHILE_RUT }}
           BCHILE_PASS: ${{ secrets.BCHILE_PASS }}
           BCHILE_2FA_TIMEOUT_SEC: "300"
