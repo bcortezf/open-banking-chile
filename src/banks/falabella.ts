@@ -160,6 +160,13 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   await delay(8000);
   await screenshotIfEnabled(page, "03-after-login", doScreenshots, debugLog);
 
+  // Detectar errores de login ANTES de cerrar modales (p.ej. "Entendido")
+  const loginError = await detectFalabellaLoginError(page);
+  if (loginError) {
+    const ss = (await page.screenshot()).toString("base64");
+    return { success: false, error: loginError, screenshot: ss };
+  }
+
   // Close post-login popups
   try {
     const closeBtn = page.getByRole("button", { name: "cerrar", exact: true });
@@ -182,19 +189,117 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     return { success: false, error: "El banco pide clave dinámica (2FA).", screenshot: ss };
   }
 
-  // Error check
-  const errorText = await page.locator('[class*="error"], [class*="alert"], [role="alert"]')
-    .first()
-    .textContent({ timeout: 2000 })
-    .catch(() => null);
-  if (errorText && errorText.trim().length > 5 && errorText.trim().length < 200) {
+  // Re-check por si el modal apareció tarde
+  const lateError = await detectFalabellaLoginError(page);
+  if (lateError) {
     const ss = (await page.screenshot()).toString("base64");
-    return { success: false, error: `Error del banco: ${errorText.trim()}`, screenshot: ss };
+    return { success: false, error: lateError, screenshot: ss };
   }
+
+  // Cerrar modales informativos (ModalMessage) que bloquean la UI post-login
+  await dismissFalabellaModals(page, debugLog);
 
   debugLog.push("6. Login OK!");
   progress("Sesión iniciada correctamente");
   return { success: true };
+}
+
+/**
+ * Detecta modales/páginas de error post-login de Falabella.
+ * Los mensajes suelen ir en dialogs sin clases error/alert.
+ */
+async function detectFalabellaLoginError(page: Page): Promise<string | null> {
+  return await page.evaluate(() => {
+    const body = (document.body?.innerText || "").toLowerCase();
+
+    // Clave bloqueada (varios textos del portal)
+    if (
+      body.includes("clave internet se encuentra bloqueada") ||
+      body.includes("clave se encuentra bloqueada") ||
+      body.includes("su clave se encuentra bloqueada") ||
+      (body.includes("clave") && body.includes("bloqueada") &&
+        (body.includes("cajero automático") ||
+          body.includes("cajero automatico") ||
+          body.includes("ingreso no habitual") ||
+          body.includes("por tu seguridad") ||
+          body.includes("por su seguridad")))
+    ) {
+      return "Clave bloqueada — debes desbloquearla en cajero o con un ejecutivo del banco";
+    }
+
+    // Credenciales inválidas
+    if (
+      body.includes("rut o clave no son válidos") ||
+      body.includes("rut o clave no son validos") ||
+      body.includes("el rut o clave no son válidos") ||
+      body.includes("el rut o clave no son validos")
+    ) {
+      return "RUT o clave inválidos";
+    }
+
+    // Alertas clásicas (si existen)
+    const selectors = ['[class*="error"]', '[class*="alert"]', '[role="alert"]', '[role="dialog"]'];
+    for (const sel of selectors) {
+      for (const el of Array.from(document.querySelectorAll(sel))) {
+        const text = (el as HTMLElement).innerText?.trim() || "";
+        if (text.length < 5 || text.length > 300) continue;
+        const lower = text.toLowerCase();
+        if (lower.includes("bloquead")) {
+          return "Clave bloqueada — debes desbloquearla en cajero o con un ejecutivo del banco";
+        }
+        if (
+          lower.includes("no son válidos") ||
+          lower.includes("no son validos") ||
+          lower.includes("incorrect") ||
+          lower.includes("inválid") ||
+          lower.includes("invalid")
+        ) {
+          return `Error del banco: ${text.replace(/\s+/g, " ").slice(0, 200)}`;
+        }
+      }
+    }
+
+    return null;
+  });
+}
+
+/** Cierra overlays `#modal-message` / ModalMessage que bloquean clicks. */
+async function dismissFalabellaModals(page: Page, debugLog: string[]): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    const overlay = page.locator(
+      "#modal-message [class*='ModalMessage_overlay'], [class*='ModalMessage_overlay'][class*='ModalMessage_show']",
+    ).first();
+    const visible = await overlay.isVisible({ timeout: 500 }).catch(() => false);
+    if (!visible) {
+      // También detectar por botón Entendido dentro de #modal-message
+      const btn = page
+        .locator("#modal-message button")
+        .filter({ hasText: /^(Entendido|Aceptar|Continuar|Cerrar)$/i })
+        .first();
+      if (!(await btn.isVisible({ timeout: 400 }).catch(() => false))) break;
+      await btn.click({ timeout: 3000 }).catch(() => {});
+      debugLog.push("  Modal Falabella cerrado (#modal-message)");
+      await delay(800);
+      continue;
+    }
+
+    const action = page
+      .locator("#modal-message button, [class*='ModalMessage'] button")
+      .filter({ hasText: /^(Entendido|Aceptar|Continuar|Cerrar)$/i })
+      .first();
+    if (await action.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await action.click({ timeout: 5000 }).catch(async () => {
+        await action.click({ force: true, timeout: 3000 }).catch(() => {});
+      });
+      debugLog.push("  Modal Falabella cerrado (ModalMessage overlay)");
+      await delay(800);
+      continue;
+    }
+
+    // Escape como último recurso
+    await page.keyboard.press("Escape").catch(() => {});
+    await delay(500);
+  }
 }
 
 // ─── Account movements ──────────────────────────────────────────
@@ -203,15 +308,30 @@ async function scrapeAccountMovements(page: Page, debugLog: string[], doScreensh
   debugLog.push("7. [Cuenta] Looking for account...");
   progress("Buscando cartola de cuenta...");
 
+  await dismissFalabellaModals(page, debugLog);
+
   // Try clicking on Cuenta Corriente product card
   const ccLink = page.getByRole("link", { name: /Cuenta Corriente \d/ });
   let navigated = false;
 
   if (await ccLink.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await ccLink.click();
-    await page.waitForLoadState("networkidle").catch(() => {});
-    await delay(3000);
-    navigated = true;
+    try {
+      await ccLink.click({ timeout: 10000 });
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await delay(3000);
+      navigated = true;
+    } catch {
+      debugLog.push("  Click Cuenta Corriente falló (posible modal); reintentando tras dismiss...");
+      await dismissFalabellaModals(page, debugLog);
+      try {
+        await ccLink.click({ timeout: 10000 });
+        await page.waitForLoadState("networkidle").catch(() => {});
+        await delay(3000);
+        navigated = true;
+      } catch {
+        /* fallback abajo */
+      }
+    }
   }
 
   if (!navigated) {
@@ -220,21 +340,39 @@ async function scrapeAccountMovements(page: Page, debugLog: string[], doScreensh
       const link = page.locator("a, button, [role='tab']").filter({ hasText: new RegExp(text, "i") }).first();
       if (await link.isVisible({ timeout: 2000 }).catch(() => false)) {
         try {
-          await link.click();
+          await link.click({ timeout: 10000 });
           await delay(4000);
           navigated = true;
           break;
-        } catch { /* try next */ }
+        } catch {
+          await dismissFalabellaModals(page, debugLog);
+        }
       }
     }
   }
 
   if (!navigated) {
     // Try clicking any account-like element
+    await dismissFalabellaModals(page, debugLog);
     const acctEl = page.locator("a, div, button").filter({ hasText: /cuenta corriente|cuenta vista/i }).first();
     if (await acctEl.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await acctEl.click();
-      await delay(4000);
+      try {
+        await acctEl.click({ timeout: 10000 });
+        await delay(4000);
+        navigated = true;
+      } catch (err) {
+        debugLog.push(
+          `  Click cuenta fallback falló: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+        );
+        // Último intento: force click si un overlay residual sigue interceptando
+        try {
+          await acctEl.click({ force: true, timeout: 5000 });
+          await delay(4000);
+          navigated = true;
+        } catch {
+          /* seguimos; puede haber movimientos en la vista actual */
+        }
+      }
     }
   }
 
@@ -931,6 +1069,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       const closeBtn = page.getByRole("button", { name: "cerrar", exact: true });
       if (await closeBtn.isVisible({ timeout: 2000 }).catch(() => false)) await closeBtn.click();
     } catch { /* no popup */ }
+    await dismissFalabellaModals(page, debugLog);
 
     const { creditCard } = await scrapeCreditCard(page, debugLog, doScreenshots, progress, owner);
 
