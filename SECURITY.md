@@ -51,9 +51,11 @@ El flujo E2E usa **credenciales bancarias reales** que viven como **GitHub Secre
 |--------|-------|---------|
 | `BCHILE_RUT` | Banco de Chile | `20020177-9` |
 | `BCHILE_PASS` | Banco de Chile | `tu_clave` |
+| `FALABELLA_RUT` | Banco Falabella | `12345678-9` |
+| `FALABELLA_PASS` | Banco Falabella | `tu_clave` |
 | `DEEPSEEK_API_KEY` | AI Review | `sk-...` |
 
-> Para agregar más bancos: agrega sus secrets y un job en `e2e.yml`.
+> Si falta el secret de un banco, ese suite E2E se skipea. Para agregar más bancos: secrets + entrada en `E2E_BANKS` / `src/e2e.test.ts`.
 
 ### Flujo de aprobación
 
