@@ -203,6 +203,10 @@ async function clickSubmitButton(page: Page, debugLog: string[]): Promise<boolea
   return false;
 }
 
+/**
+ * Detecta errores de login en alertas DOM y también en pantallas completas
+ * (p.ej. "Reactivación de tu Clave Bloqueada"), que no usan clases error/alert.
+ */
 async function detectLoginError(page: Page): Promise<string | null> {
   return await page.evaluate(() => {
     const selectors = ['[class*="error"]', '[class*="alert"]', '[role="alert"]'];
@@ -234,6 +238,22 @@ async function detectLoginError(page: Page): Promise<string | null> {
       for (const kw of keywords) {
         if (lower.includes(kw)) return text;
       }
+    }
+
+    // Pantallas full-page (sin alertas): clave bloqueada / olvido de clave
+    const body = (document.body?.innerText || "").toLowerCase();
+    const title = (document.title || "").toLowerCase();
+    const haystack = `${title}\n${body}`;
+
+    if (
+      haystack.includes("reactivación de tu clave bloqueada") ||
+      haystack.includes("reactivacion de tu clave bloqueada") ||
+      haystack.includes("clave de acceso ha sido bloqueada") ||
+      (haystack.includes("clave bloqueada") &&
+        (haystack.includes("superado la cantidad de intentos") ||
+          haystack.includes("has superado la cantidad de intentos")))
+    ) {
+      return "Clave bloqueada — debes reactivarla en el portal del banco";
     }
 
     return null;
@@ -396,7 +416,14 @@ async function loginEmpresa(
   const currentUrl = page.url();
   if (currentUrl.includes("login.portalempresas") && currentUrl.includes("/login")) {
     const screenshot = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: "Login failed — aún en página de login", screenshot: screenshot as string };
+    const lateError = await detectLoginError(page);
+    return {
+      success: false,
+      error: lateError
+        ? `Error de login: ${lateError}`
+        : "Login failed — aún en página de login",
+      screenshot: screenshot as string,
+    };
   }
 
   debugLog.push(`4. Login Empresa OK! URL: ${currentUrl}`);
@@ -508,7 +535,14 @@ async function login(
   const currentUrl = page.url();
   if (currentUrl.includes("/login")) {
     const screenshot = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: "Login failed — aún en página de login", screenshot: screenshot as string };
+    const lateError = await detectLoginError(page);
+    return {
+      success: false,
+      error: lateError
+        ? `Error de login: ${lateError}`
+        : "Login failed — aún en página de login",
+      screenshot: screenshot as string,
+    };
   }
 
   debugLog.push(`4. Login OK!`);
@@ -678,8 +712,8 @@ function buildCardBody(card: ApiCardInfo, nombreTitular: string) {
 
 interface ApiCartolaMov {
   descripcion: string;
-  monto: number;
-  saldo: number;
+  monto: number | string;
+  saldo: number | string;
   tipo: string; // "cargo" | "abono"
   fechaContable: string;
 }
@@ -731,12 +765,14 @@ type ApiCartolaResponse = {
   pagina: Array<{ totalRegistros: number; masPaginas: boolean }>;
 };
 
-function cartolaMovToMovement(mov: ApiCartolaMov): BankMovement {
+export function cartolaMovToMovement(mov: ApiCartolaMov): BankMovement {
+  const monto = Number(mov.monto) || 0;
+  const saldo = Number(mov.saldo) || 0;
   return {
     date: normalizeDate(mov.fechaContable),
     description: mov.descripcion.trim(),
-    amount: mov.tipo === "cargo" ? -Math.abs(mov.monto) : Math.abs(mov.monto),
-    balance: mov.saldo,
+    amount: mov.tipo === "cargo" ? -Math.abs(monto) : Math.abs(monto),
+    balance: saldo,
     source: MOVEMENT_SOURCE.account,
   };
 }
@@ -1047,7 +1083,7 @@ async function fetchAccountMovements(
         }
 
         if (balance === undefined && acct.codigoMoneda === "CLP" && cartola.movimientos.length > 0) {
-          balance = cartola.movimientos[0].saldo;
+          balance = Number(cartola.movimientos[0].saldo) || undefined;
         }
 
         const pageSize = cartola.movimientos.length;
