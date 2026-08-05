@@ -8,22 +8,61 @@ on:
 # Corre SOLO cuando un mantenedor aprueba el Environment "e2e".
 # Los secrets están cifrados: solo el admin puede ver/editar sus valores.
 #
-# Cada banco corre en un job paralelo (matrix) con Chrome aislado.
-# fail-fast: false → si falla uno, el otro igual termina.
+# Optimización: solo corren los E2E de los bancos cuyo código cambió.
+# Si cambian archivos compartidos (types, utils, cli, index) → corren TODOS.
+# Ej: un PR que agrega solo falabella no ejecuta E2E bchile.
 
 permissions:
   contents: read
 
 jobs:
+  detect:
+    name: 🔎 Detectar bancos afectados
+    runs-on: ubuntu-latest
+    outputs:
+      banks: ${{ steps.resolve.outputs.banks }}
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔍 Detectar cambios por banco
+        id: filter
+        uses: dawidd6/action-detect-changes@v1
+        with:
+          # Patrón: <grupo> : <archivos que lo afectan>
+          changeMatcher: |
+            bchile: src/banks/bchile.ts src/banks/bchile.test.ts
+            falabella: src/banks/falabella.ts src/banks/falabella.test.ts
+            core: src/types.ts src/utils.ts src/cli.ts src/index.ts .github/workflows/*.yml src/e2e.test.ts
+
+      - name: 🎯 Resolver bancos a probar
+        id: resolve
+        run: |
+          CHANGED="${{ steps.filter.outputs.changes }}"
+          echo "Grupos cambiados: $CHANGED"
+          if echo "$CHANGED" | grep -q "core"; then
+            # Cambios compartidos → correr todos los bancos con E2E configurado
+            echo "banks=[\"bchile\",\"falabella\"]" >> "$GITHUB_OUTPUT"
+          elif [ -z "$CHANGED" ] || [ "$CHANGED" = "[]" ]; then
+            # Sin bancos tocados (solo docs/README) → no correr E2E
+            echo "banks=[]" >> "$GITHUB_OUTPUT"
+          else
+            # Solo los bancos tocados
+            echo "banks=$CHANGED" >> "$GITHUB_OUTPUT"
+          fi
+
   e2e:
     name: E2E ${{ matrix.bank }}
     runs-on: ubuntu-latest
+    needs: detect
     environment: e2e
-    if: github.actor != 'dependabot[bot]'
+    if: needs.detect.outputs.banks != '[]' && github.actor != 'dependabot[bot]'
     strategy:
       fail-fast: false
       matrix:
-        bank: [bchile, falabella]
+        bank: ${{ fromJSON(needs.detect.outputs.banks) }}
 
     steps:
       - name: 📥 Checkout
