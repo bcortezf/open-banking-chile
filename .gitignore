@@ -6,3 +6,5 @@ screenshots/
 debug/
 .DS_Store
 .claude/
+__pycache__/
+.hermes/
