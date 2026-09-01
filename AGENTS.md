@@ -70,6 +70,12 @@ node dist/cli.js --help                               # Ayuda completa
 | `--owner <T\|A\|B>` | Filtro Titular/Adicional para TC (default: B) |
 | `--empresa` | [BCHILE] Portal empresas |
 | `--bankQuery <RUT>` | [BCHILE] RUT empresa específica |
+| `--beneficiarios` | [BCHILE empresas] Listar agenda TEF |
+| `--validar-cuenta` | [BCHILE empresas] ¿RUT+cuenta está en la agenda? |
+| `--transferir` | [BCHILE empresas] Transferencia express + Mi Pass |
+| `--add-beneficiario` | [BCHILE empresas] Agregar destinatario |
+
+`ScraperOptions.page` acepta una Page Puppeteer ya autenticada (sesión persistente). En ese caso no se abre/cierra Chrome ni se hace login/logout.
 
 ### Como librería
 

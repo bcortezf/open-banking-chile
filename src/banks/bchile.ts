@@ -2,6 +2,8 @@ import puppeteer, { type Page } from "puppeteer-core";
 import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions, BankAccountInfo, BeneficiarioData } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
 import { closePopups, delay, findChrome, formatRut, saveScreenshot, normalizeDate, deduplicateMovements, logout, normalizeInstallments } from "../utils.js";
+import { findBeneficiarioEnAgenda, parseAgendaResponse } from "./bchile-agenda.js";
+import { ejecutarTransferenciaExpress } from "./bchile-transfer.js";
 
 const BANK_URL = "https://portalpersonas.bancochile.cl/persona/";
 const API_BASE = "https://portalpersonas.bancochile.cl/mibancochile/rest/persona";
@@ -339,6 +341,21 @@ async function clickSubmitEmpresa(page: Page, debugLog: string[]): Promise<boole
   });
   if (clicked) debugLog.push("  Submit empresa clicked via text");
   return clicked;
+}
+
+async function ensureEmpresaSession(
+  page: Page,
+  rut: string,
+  password: string,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>,
+  skipLogin: boolean
+): Promise<{ success: boolean; error?: string; screenshot?: string }> {
+  if (skipLogin) {
+    debugLog.push("1. Reusando sesión existente (page).");
+    return { success: true };
+  }
+  return loginEmpresa(page, rut, password, debugLog, doSave);
 }
 
 async function loginEmpresa(
@@ -1294,11 +1311,12 @@ async function scrapeEmpresa(
   companyRut: string | null,
   debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
-  doScreenshots: boolean
+  doScreenshots: boolean,
+  skipLogin = false
 ): Promise<ScrapeResult> {
   const bank = "bchile";
 
-  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  const loginResult = await ensureEmpresaSession(page, rut, password, debugLog, doSave, skipLogin);
   if (!loginResult.success) {
     return {
       success: false, bank, movements: [],
@@ -1397,11 +1415,12 @@ async function listarBeneficiariosEmpresa(
   password: string,
   companyRut: string | null,
   debugLog: string[],
-  doSave: (page: Page, name: string) => Promise<void>
+  doSave: (page: Page, name: string) => Promise<void>,
+  skipLogin = false
 ): Promise<ScrapeResult> {
   const bank = "bchile";
 
-  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  const loginResult = await ensureEmpresaSession(page, rut, password, debugLog, doSave, skipLogin);
   if (!loginResult.success) {
     return {
       success: false, bank, movements: [],
@@ -1459,20 +1478,7 @@ async function listarBeneficiariosEmpresa(
   let beneficiarios: Array<Record<string, unknown>> = [];
   try {
     const data = await apiGetEmpresa<unknown>(page, "tef-agenda/agenda/filtro?favorito=0");
-    if (Array.isArray(data)) {
-      beneficiarios = data as Array<Record<string, unknown>>;
-    } else if (data && typeof data === "object") {
-      const d = data as Record<string, unknown>;
-      if (Array.isArray(d.listaBeneficiarios)) {
-        beneficiarios = d.listaBeneficiarios as Array<Record<string, unknown>>;
-      } else if (Array.isArray(d.destinatarios)) {
-        beneficiarios = d.destinatarios as Array<Record<string, unknown>>;
-      } else {
-        for (const v of Object.values(d)) {
-          if (Array.isArray(v)) { beneficiarios = v as Array<Record<string, unknown>>; break; }
-        }
-      }
-    }
+    beneficiarios = parseAgendaResponse(data);
   } catch (err) {
     const screenshot = await page.screenshot({ encoding: "base64" });
     return {
@@ -1504,6 +1510,7 @@ async function listarBeneficiariosEmpresa(
     success: true, bank,
     movements: [],
     cuentas: cuentasInfo,
+    beneficiarios,
     screenshot, debug: debugLog.join("\n"),
   };
 }
@@ -1617,11 +1624,12 @@ async function listarCuentasEmpresa(
   password: string,
   companyRut: string | null,
   debugLog: string[],
-  doSave: (page: Page, name: string) => Promise<void>
+  doSave: (page: Page, name: string) => Promise<void>,
+  skipLogin = false
 ): Promise<ScrapeResult> {
   const bank = "bchile";
 
-  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  const loginResult = await ensureEmpresaSession(page, rut, password, debugLog, doSave, skipLogin);
   if (!loginResult.success) {
     return {
       success: false, bank, movements: [],
@@ -1779,11 +1787,12 @@ async function agregarBeneficiario(
   datos: BeneficiarioData,
   debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
-  doScreenshots: boolean
+  doScreenshots: boolean,
+  skipLogin = false
 ): Promise<ScrapeResult> {
   const bank = "bchile";
 
-  const loginResult = await loginEmpresa(page, rut, password, debugLog, doSave);
+  const loginResult = await ensureEmpresaSession(page, rut, password, debugLog, doSave, skipLogin);
   if (!loginResult.success) {
     return {
       success: false, bank, movements: [],
@@ -2229,6 +2238,9 @@ async function agregarBeneficiario(
 async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
   const { rut, password, chromePath, saveScreenshots: doScreenshots, headful } = options;
   const bank = "bchile";
+  const reusedPage = options.page as Page | undefined;
+  const skipLogin = !!reusedPage;
+  const skipLogout = skipLogin || !!options.skipLogout;
 
   // Normalizar scope: si usaron --empresa (deprecated), convertirlo a scope
   let scope = options.scope;
@@ -2244,38 +2256,44 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
     return { success: false, bank, movements: [], error: "Debes proveer RUT y clave." };
   }
 
-  const executablePath = findChrome(chromePath);
-  if (!executablePath) {
-    return {
-      success: false, bank, movements: [],
-      error: "No se encontró Chrome/Chromium. Instala Google Chrome o pasa chromePath en las opciones.\n  Ubuntu/Debian: sudo apt install google-chrome-stable\n  macOS: brew install --cask google-chrome",
-    };
-  }
-
   let browser;
   const debugLog: string[] = [];
-  const doSave = async (page: Page, name: string) => saveScreenshot(page, name, !!doScreenshots, debugLog);
+  const doSave = async (p: Page, name: string) => saveScreenshot(p, name, !!doScreenshots, debugLog);
 
   try {
-    browser = await puppeteer.launch({
-      executablePath,
-      headless: !headful,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
-    });
+    let page: Page;
+    if (reusedPage) {
+      page = reusedPage;
+      debugLog.push("Usando Page inyectada (sesión persistente).");
+    } else {
+      const executablePath = findChrome(chromePath);
+      if (!executablePath) {
+        return {
+          success: false, bank, movements: [],
+          error: "No se encontró Chrome/Chromium. Instala Google Chrome o pasa chromePath en las opciones.\n  Ubuntu/Debian: sudo apt install google-chrome-stable\n  macOS: brew install --cask google-chrome",
+        };
+      }
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+      browser = await puppeteer.launch({
+        executablePath,
+        headless: !headful,
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
+      });
 
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => false });
-    });
+      page = await browser.newPage();
+      await page.setViewport({ width: 1280, height: 900 });
+      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => false });
+      });
+    }
 
     // Acciones: listar cuentas / listar beneficiarios / agregar beneficiario
     if (options.action === "listar-cuentas") {
       // Empresas: listar cuentas de la empresa
       if (isEmpresa) {
-        return await listarCuentasEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
+        return await listarCuentasEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, skipLogin);
       }
       // Personas: listar todas las cuentas del cliente
       return await listarCuentasPersonal(page, rut, password, debugLog, doSave);
@@ -2289,7 +2307,75 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
           debug: debugLog.join("\n"),
         };
       }
-      return await listarBeneficiariosEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave);
+      return await listarBeneficiariosEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, skipLogin);
+    }
+
+    if (options.action === "validar-cuenta") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "validar-cuenta" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      if (!options.validar?.rutBeneficiario || !options.validar?.numeroCuenta) {
+        return {
+          success: false, bank, movements: [],
+          error: "Faltan datos para validar. Usa --validar-rut y --validar-cuenta.",
+          debug: debugLog.join("\n"),
+        };
+      }
+      const listResult = await listarBeneficiariosEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, skipLogin);
+      if (!listResult.success) return listResult;
+      const match = findBeneficiarioEnAgenda(
+        listResult.beneficiarios ?? [],
+        options.validar.rutBeneficiario,
+        options.validar.numeroCuenta
+      );
+      debugLog.push(`validar-cuenta: ${match ? "encontrada" : "no encontrada"}`);
+      return {
+        success: true,
+        bank,
+        movements: [],
+        cuentaValida: !!match,
+        beneficiario: match,
+        beneficiarios: listResult.beneficiarios,
+        debug: debugLog.join("\n"),
+      };
+    }
+
+    if (options.action === "transferencia-express") {
+      if (!isEmpresa) {
+        return {
+          success: false, bank, movements: [],
+          error: 'La acción "transferencia-express" solo está disponible para empresas (--scope business).',
+          debug: debugLog.join("\n"),
+        };
+      }
+      const t = options.transferencia;
+      if (!t?.rutBeneficiario || !t?.numeroCuenta || !t?.monto || t.monto <= 0) {
+        return {
+          success: false, bank, movements: [],
+          error: "Faltan datos de transferencia. Usa --transferir --monto --beneficiario-rut --beneficiario-cuenta.",
+          debug: debugLog.join("\n"),
+        };
+      }
+      const loginResult = await ensureEmpresaSession(page, rut, password, debugLog, doSave, skipLogin);
+      if (!loginResult.success) {
+        return {
+          success: false, bank, movements: [],
+          error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
+        };
+      }
+      const transferencia = await ejecutarTransferenciaExpress(page, t, debugLog, options.onProgress);
+      return {
+        success: transferencia.success,
+        bank,
+        movements: [],
+        transferencia,
+        error: transferencia.success ? undefined : transferencia.error,
+        debug: debugLog.join("\n"),
+      };
     }
 
     if (options.action === "agregar-beneficiario") {
@@ -2307,12 +2393,12 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
           debug: debugLog.join("\n"),
         };
       }
-      return await agregarBeneficiario(page, rut, password, scope?.companyRut ?? null, options.beneficiario, debugLog, doSave, !!doScreenshots);
+      return await agregarBeneficiario(page, rut, password, scope?.companyRut ?? null, options.beneficiario, debugLog, doSave, !!doScreenshots, skipLogin);
     }
 
     // ─── Flujo Empresa ─────────────────────────────────────────────
     if (isEmpresa) {
-      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots);
+      return await scrapeEmpresa(page, rut, password, scope?.companyRut ?? null, debugLog, doSave, !!doScreenshots, skipLogin);
     }
 
     // ─── Flujo Personas (existente) ─────────────────────────────────
@@ -2417,7 +2503,7 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
   } catch (error) {
     return { success: false, bank, movements: [], error: `Error del scraper: ${error instanceof Error ? error.message : String(error)}`, debug: debugLog.join("\n") };
   } finally {
-    if (browser) {
+    if (browser && !skipLogout) {
       try {
         const pages = await browser.pages();
         if (pages.length > 0) await logout(pages[pages.length - 1], debugLog);

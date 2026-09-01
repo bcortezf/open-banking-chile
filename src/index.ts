@@ -50,9 +50,16 @@ export type {
   ScrapeResult,
   ScraperOptions,
   CreditCardBalance,
+  BankAction,
+  BeneficiarioData,
+  ValidarCuentaData,
+  TransferenciaExpressData,
+  TransferenciaResult,
+  AgendaBeneficiario,
 } from "./types.js";
 
 export { MOVEMENT_SOURCE, CARD_OWNER } from "./types.js";
+export { findBeneficiarioEnAgenda, normalizeRutAgenda, normalizeNumeroCuenta, parseAgendaResponse } from "./banks/bchile-agenda.js";
 
 // Re-export individual banks for direct import
 export { default as bchile } from "./banks/bchile.js";

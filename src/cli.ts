@@ -54,11 +54,16 @@ Opciones:
   --cuentas           [EMPRESAS/PERSONAS] Listar cuentas con saldo (sin movimientos)
   --beneficiarios     [EMPRESAS] Listar todos los beneficiarios de la agenda TEF
   --add-beneficiario  [EMPRESAS] Agregar beneficiario/cuenta en el portal
-  --beneficiario-rut <rut>      RUT del beneficiario (con --add-beneficiario)
+  --validar-cuenta    [EMPRESAS] Verificar si RUT+cuenta está en la agenda TEF
+  --transferir        [EMPRESAS] Transferencia express (requiere Mi Pass)
+  --monto <n>                   Monto a transferir (con --transferir)
+  --beneficiario-rut <rut>      RUT del beneficiario
   --beneficiario-nombre <n>     Nombre del beneficiario
   --beneficiario-banco <b>      Banco (ej: "BANCO DEL ESTADO DE CHILE")
   --beneficiario-cuenta <n>     Número de cuenta
   --beneficiario-tipo <t>       Tipo: "Cuenta Corriente" | "Cuenta Vista" (default: Cuenta Corriente)
+  --validar-rut <rut>           RUT a validar (con --validar-cuenta)
+  --validar-numero <n>          Número de cuenta a validar
   --help, -h          Mostrar esta ayuda
 
 Variables de entorno:
@@ -175,14 +180,18 @@ Ejemplos:
     }
   }
 
-  // Parse acciones: --cuentas | --beneficiarios | --add-beneficiario
-  let action: "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario" | undefined;
+  // Parse acciones: --cuentas | --beneficiarios | --add-beneficiario | --validar-cuenta | --transferir
+  let action: "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario" | "validar-cuenta" | "transferencia-express" | undefined;
   if (flags.has("--cuentas")) {
     action = "listar-cuentas";
   } else if (flags.has("--beneficiarios")) {
     action = "listar-beneficiarios";
   } else if (flags.has("--add-beneficiario")) {
     action = "agregar-beneficiario";
+  } else if (flags.has("--validar-cuenta")) {
+    action = "validar-cuenta";
+  } else if (flags.has("--transferir")) {
+    action = "transferencia-express";
   }
 
   // Parse datos del beneficiario (--add-beneficiario)
@@ -199,6 +208,19 @@ Ejemplos:
     tipoCuenta: valorFlag("--beneficiario-tipo") ?? "Cuenta Corriente",
   } : undefined;
 
+  const validar = action === "validar-cuenta" ? {
+    rutBeneficiario: valorFlag("--validar-rut") ?? valorFlag("--beneficiario-rut") ?? "",
+    numeroCuenta: valorFlag("--validar-numero") ?? valorFlag("--beneficiario-cuenta") ?? "",
+  } : undefined;
+
+  const montoRaw = valorFlag("--monto");
+  const transferencia = action === "transferencia-express" ? {
+    monto: montoRaw ? Number(montoRaw) : 0,
+    rutBeneficiario: valorFlag("--beneficiario-rut") ?? "",
+    numeroCuenta: valorFlag("--beneficiario-cuenta") ?? "",
+    bankName: valorFlag("--beneficiario-banco"),
+  } : undefined;
+
   const result = await bank.scrape({
     rut,
     password,
@@ -209,6 +231,8 @@ Ejemplos:
     ...(scope && { scope }),
     ...(action && { action }),
     ...(beneficiario && { beneficiario }),
+    ...(validar && { validar }),
+    ...(transferencia && { transferencia }),
   });
 
   if (!result.success) {

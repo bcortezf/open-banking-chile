@@ -103,6 +103,14 @@ export interface ScrapeResult {
   balance?: number;
   /** Cuentas bancarias listadas (sin movimientos) — para --cuentas */
   cuentas?: BankAccountInfo[];
+  /** Agenda TEF cruda (listar-beneficiarios / validar-cuenta) */
+  beneficiarios?: AgendaBeneficiario[];
+  /** Si la cuenta está en la agenda (validar-cuenta) */
+  cuentaValida?: boolean;
+  /** Beneficiario encontrado (validar-cuenta) */
+  beneficiario?: AgendaBeneficiario | null;
+  /** Resultado de transferencia express */
+  transferencia?: TransferenciaResult;
   /** Mensaje de error si success = false */
   error?: string;
   /** Screenshot en base64 (para debugging) */
@@ -168,7 +176,61 @@ export interface BeneficiarioData {
 }
 
 /** Acción a ejecutar en el banco */
-export type BankAction = "scrape" | "listar-cuentas" | "listar-beneficiarios" | "agregar-beneficiario";
+export type BankAction =
+  | "scrape"
+  | "listar-cuentas"
+  | "listar-beneficiarios"
+  | "agregar-beneficiario"
+  | "validar-cuenta"
+  | "transferencia-express";
+
+/** Datos para validar si una cuenta está en la agenda TEF */
+export interface ValidarCuentaData {
+  rutBeneficiario: string;
+  numeroCuenta: string;
+}
+
+/** Datos para transferencia express (Banco de Chile empresas) */
+export interface TransferenciaExpressData {
+  monto: number;
+  rutBeneficiario: string;
+  numeroCuenta: string;
+  bankName?: string;
+  /** Timeout de espera Mi Pass en ms (default 5 min) */
+  timeoutMs?: number;
+}
+
+/** Beneficiario crudo de la agenda TEF */
+export interface AgendaBeneficiario {
+  rutBeneficiario?: string;
+  numeroCuenta?: string;
+  nombreRazonSocial?: string;
+  alias?: string;
+  tipoCuenta?: string;
+  nombreBanco?: string;
+  [key: string]: unknown;
+}
+
+/** Comprobante de transferencia express */
+export interface TransferenciaComprobante {
+  n_operacion?: string | null;
+  monto?: string | null;
+  nombre_destino?: string | null;
+  rut_destino?: string | null;
+  banco_destino?: string | null;
+  cuenta_destino?: string | null;
+  cuenta_origen?: string | null;
+}
+
+/** Resultado de transferencia express */
+export interface TransferenciaResult {
+  success: boolean;
+  estado?: string;
+  idOperacion?: string | null;
+  comprobante?: TransferenciaComprobante;
+  confirmacion?: string;
+  error?: string;
+}
 
 /** Opciones para el scraper */
 export interface ScraperOptions extends BankCredentials {
@@ -186,6 +248,17 @@ export interface ScraperOptions extends BankCredentials {
   action?: BankAction;
   /** Datos del beneficiario para action="agregar-beneficiario" */
   beneficiario?: BeneficiarioData;
+  /** Datos para action="validar-cuenta" */
+  validar?: ValidarCuentaData;
+  /** Datos para action="transferencia-express" */
+  transferencia?: TransferenciaExpressData;
+  /**
+   * Página Puppeteer ya autenticada. Si se provee, no se abre ni cierra Chrome
+   * y se omite login/logout (para sidecars con sesión persistente).
+   */
+  page?: unknown;
+  /** Si es true, no cierra sesión al terminar (implícito si se pasa `page`). */
+  skipLogout?: boolean;
   /** @deprecated Use scope.type="business" en su lugar. */
   empresa?: boolean;
   /** @deprecated Use scope.companyRut en su lugar. */
