@@ -70,6 +70,8 @@ Variables de entorno:
   <BANCO>_RUT      Tu RUT (ej: FALABELLA_RUT=12345678-9)
   <BANCO>_PASS     Tu clave de internet (ej: FALABELLA_PASS=miclave)
   CHROME_PATH      Ruta al ejecutable de Chrome/Chromium (opcional)
+  BROWSER_URL      Conectar a Chrome ya abierto (ej: http://127.0.0.1:9222)
+  BROWSER_WS_ENDPOINT  Endpoint WebSocket CDP (alternativa a BROWSER_URL)
 
 Ejemplos:
   # Banco Falabella
@@ -225,6 +227,8 @@ Ejemplos:
     rut,
     password,
     chromePath: process.env.CHROME_PATH,
+    browserURL: process.env.BROWSER_URL || undefined,
+    browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT || undefined,
     saveScreenshots: flags.has("--screenshots"),
     headful: flags.has("--headful"),
     ...(owner && { owner }),

@@ -240,6 +240,14 @@ export interface ScraperOptions extends BankCredentials {
   saveScreenshots?: boolean;
   /** Si es true, usa headless: false (para debugging visual) */
   headful?: boolean;
+  /**
+   * Conectar a un Chrome ya abierto (CDP) en vez de lanzar uno nuevo.
+   * Ej: "http://host.docker.internal:9222" o "ws://127.0.0.1:9222/devtools/browser/...".
+   * Preferir browserURL (http) sobre browserWSEndpoint (ws).
+   */
+  browserURL?: string;
+  /** Endpoint WebSocket CDP (alternativa a browserURL). */
+  browserWSEndpoint?: string;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */
   owner?: "T" | "A" | "B";
   /** Alcance: personal (default) o business con RUT de empresa opcional */

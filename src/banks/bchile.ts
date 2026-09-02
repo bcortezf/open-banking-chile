@@ -2239,8 +2239,12 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
   const { rut, password, chromePath, saveScreenshots: doScreenshots, headful } = options;
   const bank = "bchile";
   const reusedPage = options.page as Page | undefined;
+  const connectUrl = (options.browserURL || process.env.BROWSER_URL || "").trim();
+  const connectWs = (options.browserWSEndpoint || process.env.BROWSER_WS_ENDPOINT || "").trim();
   const skipLogin = !!reusedPage;
-  const skipLogout = skipLogin || !!options.skipLogout;
+  // Con Chrome externo no hacemos logout/close del browser (solo disconnect).
+  const skipLogout = skipLogin || !!options.skipLogout || !!(connectUrl || connectWs);
+  let externalBrowser = false;
 
   // Normalizar scope: si usaron --empresa (deprecated), convertirlo a scope
   let scope = options.scope;
@@ -2266,24 +2270,36 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
       page = reusedPage;
       debugLog.push("Usando Page inyectada (sesión persistente).");
     } else {
-      const executablePath = findChrome(chromePath);
-      if (!executablePath) {
-        return {
-          success: false, bank, movements: [],
-          error: "No se encontró Chrome/Chromium. Instala Google Chrome o pasa chromePath en las opciones.\n  Ubuntu/Debian: sudo apt install google-chrome-stable\n  macOS: brew install --cask google-chrome",
-        };
+      const { STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS, applyStealth } = await import("../infrastructure/stealth.js");
+
+      if (connectUrl || connectWs) {
+        browser = connectUrl
+          ? await puppeteer.connect({ browserURL: connectUrl, defaultViewport: null })
+          : await puppeteer.connect({ browserWSEndpoint: connectWs, defaultViewport: null });
+        externalBrowser = true;
+        debugLog.push(`Conectado a Chrome externo (${connectUrl || connectWs}).`);
+      } else {
+        const executablePath = findChrome(chromePath);
+        if (!executablePath) {
+          return {
+            success: false, bank, movements: [],
+            error: "No se encontró Chrome/Chromium. Instala Google Chrome o pasa chromePath en las opciones.\n  Ubuntu/Debian: sudo apt install google-chrome-stable\n  macOS: brew install --cask google-chrome",
+          };
+        }
+
+        browser = await puppeteer.launch({
+          executablePath,
+          headless: !headful,
+          ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
+          args: [...STEALTH_LAUNCH_ARGS],
+        });
       }
 
-      const { STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS, applyStealth } = await import("../infrastructure/stealth.js");
-      browser = await puppeteer.launch({
-        executablePath,
-        headless: !headful,
-        ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
-        args: [...STEALTH_LAUNCH_ARGS],
-      });
-
       page = await browser.newPage();
-      await page.setViewport({ width: 1366, height: 768 });
+      // En Chrome externo no forzar viewport (DeviceMetricsOverride delata automatización).
+      if (!externalBrowser) {
+        await page.setViewport({ width: 1366, height: 768 });
+      }
       // UA nativo del Chrome instalado + parches anti-webdriver (evita mismatch Win/Linux).
       await applyStealth(page);
     }
@@ -2502,12 +2518,19 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
   } catch (error) {
     return { success: false, bank, movements: [], error: `Error del scraper: ${error instanceof Error ? error.message : String(error)}`, debug: debugLog.join("\n") };
   } finally {
-    if (browser && !skipLogout) {
-      try {
-        const pages = await browser.pages();
-        if (pages.length > 0) await logout(pages[pages.length - 1], debugLog);
-      } catch { /* best effort */ }
-      await browser.close().catch(() => {});
+    if (browser) {
+      if (!skipLogout) {
+        try {
+          const pages = await browser.pages();
+          if (pages.length > 0) await logout(pages[pages.length - 1], debugLog);
+        } catch { /* best effort */ }
+      }
+      if (externalBrowser) {
+        // Deja vivo el Chrome del host; solo suelta el CDP.
+        browser.disconnect();
+      } else if (!skipLogin) {
+        await browser.close().catch(() => {});
+      }
     }
   }
 }

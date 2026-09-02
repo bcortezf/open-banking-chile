@@ -52,11 +52,18 @@ export async function runScraper(
     };
   } finally {
     if (session?.browser) {
-      try {
-        const pages = await session.browser.pages();
-        if (pages.length > 0) await logout(pages[pages.length - 1], session.debugLog);
-      } catch { /* best effort */ }
-      await session.browser.close().catch(() => {});
+      const external = !!session.externalBrowser;
+      if (!options.skipLogout && !external) {
+        try {
+          const pages = await session.browser.pages();
+          if (pages.length > 0) await logout(pages[pages.length - 1], session.debugLog);
+        } catch { /* best effort */ }
+      }
+      if (external) {
+        await session.browser.disconnect();
+      } else {
+        await session.browser.close().catch(() => {});
+      }
     }
   }
 }
