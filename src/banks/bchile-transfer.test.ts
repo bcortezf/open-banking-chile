@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   EXPRESS_NOT_READY_ERROR,
   detectPortalBlockerText,
+  INTERMITENCIAS_ERROR,
+  isIntermitenciasText,
   isSessionFinalizadaText,
   isSistemaErrorText,
   isTefSaldoUrl,
@@ -84,6 +86,18 @@ describe("isSistemaErrorText / detectPortalBlockerText", () => {
     expect(SISTEMA_ERROR).toMatch(/Error de Sistema/i);
   });
 
+  it("detecta Presentamos intermitencias", () => {
+    const page = `
+      Presentamos intermitencias
+      No pudimos completar la operación, estamos trabajando para solucionarlo.
+      IR AL INICIO
+      REINTENTAR
+    `;
+    expect(isIntermitenciasText(page)).toBe(true);
+    expect(detectPortalBlockerText(page)).toBe("intermitencias");
+    expect(INTERMITENCIAS_ERROR).toMatch(/intermitencias/i);
+  });
+
   it("prioriza Sesión Finalizada sobre otros textos", () => {
     expect(detectPortalBlockerText("Sesión Finalizada. Debe volver a ingresar. REINGRESAR")).toBe(
       "session_finalizada",
@@ -92,6 +106,7 @@ describe("isSistemaErrorText / detectPortalBlockerText", () => {
 
   it("no marca falsos positivos en TEF normal", () => {
     expect(isSistemaErrorText("Transferencia Express Saldo en Cuenta: $1.000")).toBe(false);
+    expect(isIntermitenciasText("Transferencia Express Saldo en Cuenta: $1.000")).toBe(false);
     expect(detectPortalBlockerText("Transferencia Express Datos de la Transferencia")).toBe(null);
   });
 });

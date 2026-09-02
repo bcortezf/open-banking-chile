@@ -10,6 +10,9 @@ export const SESSION_FINALIZADA_ERROR =
 export const SISTEMA_ERROR =
   "El portal del banco respondió Error de Sistema (servicio temporalmente no disponible). Reintente más tarde.";
 
+export const INTERMITENCIAS_ERROR =
+  "El portal del banco presentó intermitencias y no pudo completar la operación. Reintente más tarde.";
+
 export const EXPRESS_NOT_READY_ERROR =
   "La sección Transferencia Express no quedó lista: no apareció el bloque \"Saldo en Cuenta:\".";
 
@@ -17,7 +20,7 @@ const TEF_SALDO_PATH = "/tef-rest/tef/saldo";
 const EXPRESS_READY_TIMEOUT_MS = 60000;
 const PORTAL_WATCH_INTERVAL_MS = 1000;
 
-export type PortalBlockerKind = "session_finalizada" | "sistema_error";
+export type PortalBlockerKind = "session_finalizada" | "sistema_error" | "intermitencias";
 
 /** Detecta el modal/texto "Sesión Finalizada" del portal empresas. */
 export function isSessionFinalizadaText(raw: string): boolean {
@@ -44,18 +47,39 @@ export function isSistemaErrorText(raw: string): boolean {
   return false;
 }
 
+/**
+ * Detecta la pantalla "Presentamos intermitencias"
+ * ("No pudimos completar la operación... IR AL INICIO / REINTENTAR").
+ */
+export function isIntermitenciasText(raw: string): boolean {
+  const t = (raw || "").toLowerCase();
+  if (!t) return false;
+  if (t.includes("presentamos intermitencias")) return true;
+  if (t.includes("intermitencias") && t.includes("no pudimos completar la operación")) return true;
+  if (t.includes("intermitencias") && (t.includes("reintentar") || t.includes("ir al inicio"))) return true;
+  return false;
+}
+
 export function detectPortalBlockerText(raw: string): PortalBlockerKind | null {
   if (isSessionFinalizadaText(raw)) return "session_finalizada";
+  if (isIntermitenciasText(raw)) return "intermitencias";
   if (isSistemaErrorText(raw)) return "sistema_error";
   return null;
 }
 
 function blockerErrorMessage(kind: PortalBlockerKind): string {
-  return kind === "sistema_error" ? SISTEMA_ERROR : SESSION_FINALIZADA_ERROR;
+  if (kind === "sistema_error") return SISTEMA_ERROR;
+  if (kind === "intermitencias") return INTERMITENCIAS_ERROR;
+  return SESSION_FINALIZADA_ERROR;
 }
 
 function blockerScreenshotName(kind: PortalBlockerKind, step: string): string {
-  const prefix = kind === "sistema_error" ? "error-sistema" : "sesion-finalizada";
+  const prefix =
+    kind === "sistema_error"
+      ? "error-sistema"
+      : kind === "intermitencias"
+        ? "intermitencias"
+        : "sesion-finalizada";
   return `${prefix}-${step}`;
 }
 
@@ -91,7 +115,7 @@ async function safeEvaluate<T>(
   }
 }
 
-async function pageDetectPortalBlocker(page: Page): Promise<PortalBlockerKind | null> {
+async function pageBodyAndModalText(page: Page): Promise<string> {
   return safeEvaluate(
     page,
     () => {
@@ -99,28 +123,15 @@ async function pageDetectPortalBlocker(page: Page): Promise<PortalBlockerKind | 
       const modal = Array.from(document.querySelectorAll("[role='dialog'], .modal, .cdk-overlay-pane, .swal2-popup, .ui-dialog"))
         .map((el) => (el.textContent || ""))
         .join(" ");
-      const raw = `${body}\n${modal}`;
-      const t = raw.toLowerCase();
-      if (
-        t.includes("sesión finalizada")
-        || t.includes("sesion finalizada")
-        || t.includes("la sesión fue finalizada")
-        || t.includes("la sesion fue finalizada")
-        || (t.includes("debe volver a ingresar") && t.includes("reingresar"))
-      ) {
-        return "session_finalizada";
-      }
-      if (
-        t.includes("error de sistema")
-        || (t.includes("temporalmente no disponible") && (t.includes("error = 500") || t.includes("error=500")))
-        || (t.includes("ir a portal empresa") && t.includes("no disponible"))
-      ) {
-        return "sistema_error";
-      }
-      return null;
+      return `${body}\n${modal}`;
     },
-    null,
+    "",
   );
+}
+
+async function pageDetectPortalBlocker(page: Page): Promise<PortalBlockerKind | null> {
+  const raw = await pageBodyAndModalText(page);
+  return detectPortalBlockerText(raw);
 }
 
 async function pageShowsSaldoEnCuenta(page: Page): Promise<boolean> {
@@ -150,7 +161,8 @@ async function pageShowsExpressShell(page: Page): Promise<boolean> {
 }
 
 /**
- * Vigilancia continua de bloqueos del portal (Sesión Finalizada / Error de Sistema).
+ * Vigilancia continua de bloqueos del portal
+ * (Sesión Finalizada / Error de Sistema / Presentamos intermitencias).
  * Puede aparecer en cualquier momento u overlay.
  */
 class PortalGuard {
@@ -739,8 +751,15 @@ export async function ejecutarTransferenciaExpress(
 
   let miPassActive = false;
   for (let attempt = 1; attempt <= 4 && !miPassActive; attempt++) {
+    {
+      const ended = await guard.check(`mipass-intento-${attempt}`);
+      if (ended) return ended;
+    }
     const rect = await getMiPassRect();
     if (!rect) {
+      // Suele ser "Presentamos intermitencias" u otro bloqueo del portal.
+      const blocked = await guard.check("sin-card-mipass");
+      if (blocked) return blocked;
       await capture("sin-card-mipass");
       return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
     }
