@@ -2367,7 +2367,7 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
           error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n"),
         };
       }
-      const transferencia = await ejecutarTransferenciaExpress(page, t, debugLog, options.onProgress);
+      const transferencia = await ejecutarTransferenciaExpress(page, t, debugLog, options.onProgress, doSave);
       return {
         success: transferencia.success,
         bank,

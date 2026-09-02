@@ -2,6 +2,46 @@ import type { Page } from "puppeteer-core";
 import type { TransferenciaComprobante, TransferenciaExpressData, TransferenciaResult } from "../types.js";
 import { delay } from "../utils.js";
 
+export type TransferShotFn = (page: Page, name: string) => Promise<void>;
+
+export async function dumpDestinatarioDebug(page: Page, debugLog: string[]): Promise<Record<string, unknown>> {
+  const dump = await page.evaluate(() => {
+    const rows = Array.from(
+      document.querySelectorAll("#destinatario .ui-select-choices-row, .ui-select-choices-row"),
+    ).map((row) => (row.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+    const matchText = ((document.querySelector("#destinatario .ui-select-match") || {}).textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    let angularItems: unknown[] = [];
+    try {
+      const container = document.getElementById("destinatario");
+      const win = window as unknown as { angular?: { element: (el: Element) => { scope: () => Record<string, unknown> } } };
+      const selectEl = container?.querySelector(".ui-select-container");
+      const selectScope = selectEl && win.angular?.element(selectEl).scope() as { $select?: { items?: unknown[] } } | undefined;
+      const items = selectScope?.$select?.items;
+      if (Array.isArray(items)) {
+        angularItems = items.slice(0, 40);
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      url: location.href,
+      matchText,
+      containerCount: document.querySelectorAll(".ui-select-container").length,
+      rowCount: rows.length,
+      rows: rows.slice(0, 40),
+      angularItemCount: angularItems.length,
+      angularItems,
+    };
+  });
+  debugLog.push(`  Destinatario debug: rows=${dump.rowCount} angularItems=${dump.angularItemCount} match="${dump.matchText}"`);
+  if (dump.rows.length) {
+    debugLog.push(`  Destinatario rows: ${dump.rows.slice(0, 8).join(" | ")}`);
+  }
+  return dump;
+}
+
 const TRANSFER_EXPRESS_URL =
   "https://portalempresas.bancochile.cl/mibancochile-web/front/empresa/index.html#/portal/tefTransferencias/PreInscribir/Express";
 
@@ -21,8 +61,14 @@ export async function ejecutarTransferenciaExpress(
   page: Page,
   datos: TransferenciaExpressData,
   debugLog: string[],
-  onProgress?: (step: string) => void
+  onProgress?: (step: string) => void,
+  shot: TransferShotFn = async () => {},
 ): Promise<TransferenciaResult> {
+  let shotIndex = 10;
+  const capture = async (name: string) => {
+    shotIndex += 1;
+    await shot(page, `${String(shotIndex).padStart(2, "0")}-tef-${name}`);
+  };
   const progress = (step: string) => {
     debugLog.push(step);
     onProgress?.(step);
@@ -53,8 +99,10 @@ export async function ejecutarTransferenciaExpress(
     formReady = await page.evaluate(() => document.querySelectorAll(".ui-select-container").length >= 2);
   }
   if (!formReady) {
+    await capture("form-no-cargo");
     return { success: false, error: "El formulario de transferencia express no cargó." };
   }
+  await capture("formulario-listo");
 
   const originSelected = await page.evaluate(() => {
     const containers = document.querySelectorAll(".ui-select-container");
@@ -78,6 +126,9 @@ export async function ejecutarTransferenciaExpress(
       if (options.length > 0) (options[0] as HTMLElement).click();
     });
     await delay(500);
+    await capture("cuenta-origen-seleccionada");
+  } else {
+    await capture("cuenta-origen-preseleccionada");
   }
 
   progress("Seleccionando beneficiario...");
@@ -130,6 +181,8 @@ export async function ejecutarTransferenciaExpress(
   }, normalizedRut, lastThreeDigits, bankName);
 
   let beneficiaryFound = angularSelected.success;
+  debugLog.push(`  Angular destinatario: ${angularSelected.success ? "ok" : angularSelected.reason}${angularSelected.itemCount != null ? ` (${angularSelected.itemCount} items)` : ""}`);
+  await capture(beneficiaryFound ? "beneficiario-angular-ok" : `beneficiario-angular-${angularSelected.reason || "fail"}`);
   if (!beneficiaryFound) {
     progress(`Angular scope: ${angularSelected.reason}. Intentando vía DOM...`);
     const matchEl = await page.$("#destinatario .ui-select-match, #destinatario [aria-label='Select box activate']");
@@ -162,6 +215,7 @@ export async function ejecutarTransferenciaExpress(
       }
     }
     await delay(1500);
+    await capture("beneficiario-dropdown-abierto");
 
     beneficiaryFound = await page.evaluate((normRut: string, last3: string, bankFilter: string) => {
       const stripAll = (s: string) => (s || "").replace(/[.\-\s]/g, "").toLowerCase();
@@ -198,16 +252,20 @@ export async function ejecutarTransferenciaExpress(
   }
 
   if (!beneficiaryFound) {
+    await dumpDestinatarioDebug(page, debugLog);
+    await capture("beneficiario-no-encontrado");
     return {
       success: false,
       error: `No se encontró el beneficiario con RUT ${datos.rutBeneficiario} y cuenta ***${lastThreeDigits}. Agréguelo en la agenda del banco.`,
     };
   }
+  await capture("beneficiario-seleccionado");
   await delay(1000);
 
   progress("Ingresando monto...");
   const montoInput = await page.$("#monto");
   if (!montoInput) {
+    await capture("sin-campo-monto");
     return { success: false, error: "No se encontró el campo de monto (#monto)" };
   }
   await montoInput.click();
@@ -229,6 +287,7 @@ export async function ejecutarTransferenciaExpress(
     }
   });
   await delay(300);
+  await capture("monto-ingresado");
 
   progress("Enviando transferencia...");
   const transferClicked = await page.evaluate(() => {
@@ -244,9 +303,11 @@ export async function ejecutarTransferenciaExpress(
     return false;
   });
   if (!transferClicked) {
+    await capture("sin-boton-transferir");
     return { success: false, error: "No se encontró el botón TRANSFERIR" };
   }
   await delay(2000);
+  await capture("despues-click-transferir");
 
   const sessionEnded = await page.evaluate(() => {
     const t = ((document.body && document.body.innerText) || "").toLowerCase();
@@ -290,6 +351,7 @@ export async function ejecutarTransferenciaExpress(
   for (let attempt = 1; attempt <= 4 && !miPassActive; attempt++) {
     const rect = await getMiPassRect();
     if (!rect) {
+      await capture("sin-card-mipass");
       return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
     }
     await page.mouse.click(rect.x, rect.y);
@@ -324,8 +386,10 @@ export async function ejecutarTransferenciaExpress(
   }
 
   if (!miPassActive) {
+    await capture("mipass-no-activo");
     return { success: false, error: "No se pudo activar Mi Pass. La notificación no se envió al teléfono." };
   }
+  await capture("mipass-activo");
 
   progress("Autoriza la operación en tu app Mi Pass...");
   const miPassStart = Date.now();
@@ -371,14 +435,19 @@ export async function ejecutarTransferenciaExpress(
       break;
     }
     progress(`Esperando aprobación Mi Pass... (${elapsed}s)`);
+    if (elapsed === 5 || elapsed % 30 === 0) {
+      await capture(`mipass-espera-${elapsed}s`);
+    }
   }
 
   if (!confirmationFound) {
+    await capture("mipass-timeout");
     return { success: false, error: "Tiempo de espera agotado. Apruebe Mi Pass antes de que expire." };
   }
 
   progress("Transferencia confirmada");
   await delay(2000);
+  await capture("comprobante");
 
   const comprobante = await page.evaluate((): TransferenciaComprobante => {
     const body = (document.body && document.body.innerText) || "";
