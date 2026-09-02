@@ -82,6 +82,14 @@ export async function saveScreenshot(
     fullPage: true,
   });
   debugLog.push(`  Screenshot saved: screenshots/${safeName}.png`);
+  // HTML del mismo paso para debug (errores SPA / intermitencias / Mi Pass).
+  try {
+    const html = await page.content();
+    fs.writeFileSync(path.join(dir, `${safeName}.html`), html, "utf8");
+    debugLog.push(`  HTML saved: screenshots/${safeName}.html`);
+  } catch {
+    // ignore — navegación puede invalidar el frame
+  }
 }
 
 /** Cierra popups y modales genéricos */

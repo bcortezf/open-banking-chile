@@ -708,10 +708,17 @@ export async function ejecutarTransferenciaExpress(
     await capture("sin-boton-transferir");
     return { success: false, error: "No se encontró el botón TRANSFERIR" };
   }
-  await delay(2000);
+  // Tras TRANSFERIR el portal hace requests; a veces responde con intermitencias.
+  await delay(2500);
   await capture("despues-click-transferir");
   {
     const ended = await guard.check("post-transferir");
+    if (ended) return ended;
+  }
+  await delay(1500);
+  await capture("pre-autorizacion");
+  {
+    const ended = await guard.check("pre-autorizacion");
     if (ended) return ended;
   }
 
