@@ -7,6 +7,13 @@ export type TransferShotFn = (page: Page, name: string) => Promise<void>;
 export const SESSION_FINALIZADA_ERROR =
   "La sesión del portal fue finalizada. Vuelva a intentar la transferencia.";
 
+export const EXPRESS_NOT_READY_ERROR =
+  "La sección Transferencia Express no quedó lista: no apareció el bloque \"Saldo en Cuenta:\".";
+
+const TEF_SALDO_PATH = "/tef-rest/tef/saldo";
+const EXPRESS_READY_TIMEOUT_MS = 60000;
+const SESSION_WATCH_INTERVAL_MS = 1000;
+
 /** Detecta el modal/texto "Sesión Finalizada" del portal empresas. */
 export function isSessionFinalizadaText(raw: string): boolean {
   const t = (raw || "").toLowerCase();
@@ -15,6 +22,15 @@ export function isSessionFinalizadaText(raw: string): boolean {
   if (t.includes("la sesión fue finalizada") || t.includes("la sesion fue finalizada")) return true;
   if (t.includes("debe volver a ingresar") && t.includes("reingresar")) return true;
   return false;
+}
+
+/** True si el formulario Express ya muestra el saldo de la cuenta de origen. */
+export function pageHasSaldoEnCuentaText(raw: string): boolean {
+  return /saldo\s+en\s+cuenta\s*:/i.test(raw || "");
+}
+
+export function isTefSaldoUrl(url: string): boolean {
+  return (url || "").includes(TEF_SALDO_PATH);
 }
 
 async function pageShowsSessionFinalizada(page: Page): Promise<boolean> {
@@ -33,16 +49,149 @@ async function pageShowsSessionFinalizada(page: Page): Promise<boolean> {
   ]);
 }
 
-async function failIfSessionFinalizada(
+async function pageShowsSaldoEnCuenta(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const body = (document.body && (document.body.innerText || document.body.textContent)) || "";
+    return /saldo\s+en\s+cuenta\s*:/i.test(body);
+  });
+}
+
+/**
+ * Vigilancia continua de "Sesión Finalizada" (puede aparecer en cualquier momento / overlay).
+ */
+class SessionGuard {
+  private ended = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private lastStep = "watch";
+
+  constructor(
+    private readonly page: Page,
+    private readonly capture: (name: string) => Promise<void>,
+    private readonly debugLog: string[],
+  ) {}
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      pageShowsSessionFinalizada(this.page)
+        .then((hit) => {
+          if (hit) this.ended = true;
+        })
+        .catch(() => undefined);
+    }, SESSION_WATCH_INTERVAL_MS);
+    if (typeof this.timer.unref === "function") this.timer.unref();
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  markStep(step: string): void {
+    this.lastStep = step;
+  }
+
+  async check(step?: string): Promise<TransferenciaResult | null> {
+    if (step) this.lastStep = step;
+    if (this.ended || (await pageShowsSessionFinalizada(this.page))) {
+      this.ended = true;
+      this.debugLog.push(`  Sesión finalizada detectada en: ${this.lastStep}`);
+      await this.capture(`sesion-finalizada-${this.lastStep}`);
+      return { success: false, error: SESSION_FINALIZADA_ERROR };
+    }
+    return null;
+  }
+}
+
+async function waitForExpressSaldoReady(
   page: Page,
-  capture: (name: string) => Promise<void>,
+  guard: SessionGuard,
+  progress: (step: string) => void,
   debugLog: string[],
-  step: string,
+  timeoutMs = EXPRESS_READY_TIMEOUT_MS,
 ): Promise<TransferenciaResult | null> {
-  if (!(await pageShowsSessionFinalizada(page))) return null;
-  debugLog.push(`  Sesión finalizada detectada en: ${step}`);
-  await capture(`sesion-finalizada-${step}`);
-  return { success: false, error: SESSION_FINALIZADA_ERROR };
+  progress('Esperando bloque "Saldo en Cuenta:" (requests de fondo)...');
+  guard.markStep("espera-saldo");
+
+  let saldoResponseSeen = false;
+  const onResponse = (response: { url: () => string; status: () => number }) => {
+    try {
+      if (isTefSaldoUrl(response.url()) && response.status() >= 200 && response.status() < 400) {
+        saldoResponseSeen = true;
+      }
+    } catch {
+      // ignore
+    }
+  };
+  page.on("response", onResponse);
+
+  const started = Date.now();
+  let originKickTried = false;
+  try {
+    while (Date.now() - started < timeoutMs) {
+      const ended = await guard.check("espera-saldo");
+      if (ended) return ended;
+
+      if (await pageShowsSaldoEnCuenta(page)) {
+        debugLog.push(
+          `  Express listo: "Saldo en Cuenta:" visible` +
+            (saldoResponseSeen ? " (request tef/saldo OK)" : ""),
+        );
+        return null;
+      }
+
+      // Si ya llegó la API, dale un poco más al DOM Angular.
+      if (saldoResponseSeen) {
+        await delay(800);
+        if (await pageShowsSaldoEnCuenta(page)) {
+          debugLog.push('  Express listo: "Saldo en Cuenta:" tras response tef/saldo');
+          return null;
+        }
+      }
+
+      // El banco suele disparar tef/saldo al elegir cuenta de origen. Si el skeleton
+      // ya está y aún no hay saldo, una sola selección kick-start (sin tocar beneficiario).
+      if (!originKickTried && !saldoResponseSeen && Date.now() - started > 8000) {
+        const kicked = await page.evaluate(() => {
+          const containers = document.querySelectorAll(".ui-select-container");
+          if (containers.length < 2) return false;
+          const match = containers[1].querySelector(".ui-select-match") as HTMLElement | null;
+          const current = ((match && match.textContent) || "").trim();
+          if (current.length > 5 && (current.includes("CUENTA") || current.includes("Saldo") || /\d{2,}/.test(current))) {
+            return false;
+          }
+          if (match) {
+            match.scrollIntoView({ block: "center" });
+            match.click();
+          }
+          return true;
+        });
+        originKickTried = true;
+        if (kicked) {
+          debugLog.push("  Kick: abriendo cuenta de origen para disparar tef/saldo");
+          await delay(800);
+          await page.evaluate(() => {
+            const options = Array.from(
+              document.querySelectorAll(".ui-select-choices-row > a, .ui-select-choices-row-inner > a"),
+            );
+            if (options.length > 0) (options[0] as HTMLElement).click();
+          });
+          await delay(1000);
+        }
+      }
+
+      await delay(500);
+    }
+  } finally {
+    page.off("response", onResponse);
+  }
+
+  debugLog.push(
+    `  Timeout esperando "Saldo en Cuenta:" (saldoResponseSeen=${saldoResponseSeen})`,
+  );
+  return { success: false, error: EXPRESS_NOT_READY_ERROR };
 }
 
 export async function dumpDestinatarioDebug(page: Page, debugLog: string[]): Promise<Record<string, unknown>> {
@@ -125,6 +274,10 @@ export async function ejecutarTransferenciaExpress(
   const bankName = datos.bankName || "";
   const timeoutMs = datos.timeoutMs ?? MIPASS_WAIT_MAX_MS;
 
+  const guard = new SessionGuard(page, capture, debugLog);
+  guard.start();
+
+  try {
   progress(`Navegando al formulario de transferencia express (***${lastThreeDigits})...`);
 
   try {
@@ -132,28 +285,23 @@ export async function ejecutarTransferenciaExpress(
   } catch {
     // SPA hash navigation
   }
-  await delay(3000);
-
+  await delay(1500);
   {
-    const ended = await failIfSessionFinalizada(page, capture, debugLog, "post-nav");
+    const ended = await guard.check("post-nav");
     if (ended) return ended;
   }
 
-  let formReady = await page.evaluate(() => document.querySelectorAll(".ui-select-container").length >= 2);
-  if (!formReady) {
-    await delay(5000);
-    formReady = await page.evaluate(() => document.querySelectorAll(".ui-select-container").length >= 2);
-  }
+  // No interactuar hasta que la vista Express esté usable (bloque Saldo en Cuenta: / tef/saldo).
   {
-    const ended = await failIfSessionFinalizada(page, capture, debugLog, "form-load");
-    if (ended) return ended;
+    const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog);
+    if (notReady) {
+      await capture("express-sin-saldo-en-cuenta");
+      return notReady;
+    }
   }
-  if (!formReady) {
-    await capture("form-no-cargo");
-    return { success: false, error: "El formulario de transferencia express no cargó." };
-  }
-  await capture("formulario-listo");
+  await capture("formulario-listo-con-saldo");
 
+  // Si por alguna razón aún no hay cuenta de origen seleccionada, elegir la primera.
   const originSelected = await page.evaluate(() => {
     const containers = document.querySelectorAll(".ui-select-container");
     const match = containers[1] && containers[1].querySelector(".ui-select-match");
@@ -171,22 +319,38 @@ export async function ejecutarTransferenciaExpress(
       }
     });
     await delay(1000);
+    {
+      const ended = await guard.check("cuenta-origen-dropdown");
+      if (ended) return ended;
+    }
     await page.evaluate(() => {
       const options = Array.from(document.querySelectorAll(".ui-select-choices-row > a, .ui-select-choices-row-inner > a"));
       if (options.length > 0) (options[0] as HTMLElement).click();
     });
     await delay(500);
+    // Tras elegir origen, el banco vuelve a pedir saldo.
+    {
+      const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog, 30000);
+      if (notReady) {
+        await capture("express-sin-saldo-post-origen");
+        return notReady;
+      }
+    }
     await capture("cuenta-origen-seleccionada");
   } else {
     await capture("cuenta-origen-preseleccionada");
   }
   {
-    const ended = await failIfSessionFinalizada(page, capture, debugLog, "cuenta-origen");
+    const ended = await guard.check("cuenta-origen");
     if (ended) return ended;
   }
 
   progress("Seleccionando beneficiario...");
   await delay(600);
+  {
+    const ended = await guard.check("pre-beneficiario");
+    if (ended) return ended;
+  }
 
   const angularSelected = await page.evaluate((normRut: string, last3: string, bankFilter: string) => {
     const container = document.getElementById("destinatario");
@@ -307,7 +471,7 @@ export async function ejecutarTransferenciaExpress(
 
   if (!beneficiaryFound) {
     {
-      const ended = await failIfSessionFinalizada(page, capture, debugLog, "beneficiario");
+      const ended = await guard.check("beneficiario");
       if (ended) return ended;
     }
     await dumpDestinatarioDebug(page, debugLog);
@@ -322,7 +486,7 @@ export async function ejecutarTransferenciaExpress(
 
   progress("Ingresando monto...");
   {
-    const ended = await failIfSessionFinalizada(page, capture, debugLog, "pre-monto");
+    const ended = await guard.check("pre-monto");
     if (ended) return ended;
   }
   const montoInput = await page.$("#monto");
@@ -371,11 +535,15 @@ export async function ejecutarTransferenciaExpress(
   await delay(2000);
   await capture("despues-click-transferir");
   {
-    const ended = await failIfSessionFinalizada(page, capture, debugLog, "post-transferir");
+    const ended = await guard.check("post-transferir");
     if (ended) return ended;
   }
 
   progress("Seleccionando Mi Pass...");
+  {
+    const ended = await guard.check("pre-mipass");
+    if (ended) return ended;
+  }
   const isMiPassActivated = () => page.evaluate(() => {
     const el = document.querySelector(".minerva-card-secondary-resume.authorize-card");
     if (!el) return false;
@@ -480,6 +648,10 @@ export async function ejecutarTransferenciaExpress(
 
   while (Date.now() - miPassStart < timeoutMs) {
     await delay(MIPASS_POLL_INTERVAL_MS);
+    {
+      const ended = await guard.check("mipass-espera");
+      if (ended) return ended;
+    }
     const result = await detectPageState();
     const elapsed = Math.round((Date.now() - miPassStart) / 1000);
     if (result.state === "session_ended") {
@@ -541,4 +713,7 @@ export async function ejecutarTransferenciaExpress(
     comprobante,
     confirmacion: confirmationFound.slice(0, 300),
   };
+  } finally {
+    guard.stop();
+  }
 }

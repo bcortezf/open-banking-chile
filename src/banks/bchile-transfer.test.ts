@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isSessionFinalizadaText, SESSION_FINALIZADA_ERROR } from "./bchile-transfer.js";
+import {
+  EXPRESS_NOT_READY_ERROR,
+  isSessionFinalizadaText,
+  isTefSaldoUrl,
+  pageHasSaldoEnCuentaText,
+  SESSION_FINALIZADA_ERROR,
+} from "./bchile-transfer.js";
 
 describe("isSessionFinalizadaText", () => {
   it("detecta el modal Sesión Finalizada", () => {
@@ -24,5 +30,31 @@ describe("isSessionFinalizadaText", () => {
 
   it("expone mensaje de error estable", () => {
     expect(SESSION_FINALIZADA_ERROR).toMatch(/sesión del portal fue finalizada/i);
+  });
+});
+
+describe("pageHasSaldoEnCuentaText", () => {
+  it("detecta el bloque listo de Express", () => {
+    expect(pageHasSaldoEnCuentaText("Cuenta de Origen\nSaldo en Cuenta: $32.292")).toBe(true);
+    expect(pageHasSaldoEnCuentaText("saldo en cuenta: $1")).toBe(true);
+  });
+
+  it("no acepta el formulario vacío sin saldo", () => {
+    expect(pageHasSaldoEnCuentaText("Transferencia Express Datos de la Transferencia")).toBe(false);
+  });
+});
+
+describe("isTefSaldoUrl", () => {
+  it("reconoce la request de saldo", () => {
+    expect(
+      isTefSaldoUrl(
+        "https://portalempresas.bancochile.cl/mibancochile/rest/empresa/tef-rest/tef/saldo?numeroCuenta=205025356",
+      ),
+    ).toBe(true);
+    expect(isTefSaldoUrl("https://example.com/other")).toBe(false);
+  });
+
+  it("expone error de sección no lista", () => {
+    expect(EXPRESS_NOT_READY_ERROR).toMatch(/Saldo en Cuenta/i);
   });
 });
