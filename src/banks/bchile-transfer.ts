@@ -829,28 +829,67 @@ export async function ejecutarTransferenciaExpress(
     });
   };
 
-  const getMiPassRect = () => page.evaluate(() => {
-    // Si ya está autorizando, no devolver coords para click.
+  /**
+   * Click DOM nativo (HTMLElement.click + eventos) en vez de mouse CDP por coords.
+   * El click sintético de Puppeteer (Input.dispatchMouseEvent) a veces hace que el
+   * POST pagar-express / SSO obrareq falle con intermitencias.
+   */
+  const clickMiPassDom = () => page.evaluate(() => {
     const body = (document.body && (document.body.innerText || document.body.textContent || "")) || "";
-    if (/autorizando\s+con\s+mi\s*pass/i.test(body)) return null;
+    if (/autorizando\s+con\s+mi\s*pass/i.test(body)) {
+      return { ok: false, reason: "already-authorizing" as const };
+    }
 
-    const specific = document.querySelector(".card-left-content-miPass");
-    if (specific) {
-      const parent = (specific.closest(".authorize-card-item") || specific) as HTMLElement;
-      parent.scrollIntoView({ block: "center" });
-      const r = parent.getBoundingClientRect();
-      if (r.width > 0) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-    }
-    const cards = Array.from(document.querySelectorAll(".authorize-card-item"));
-    for (const card of cards) {
-      const text = card.textContent || "";
-      if (text.includes("Mi Pass") && !text.includes("Digipass")) {
-        (card as HTMLElement).scrollIntoView({ block: "center" });
-        const r = card.getBoundingClientRect();
-        if (r.width > 0) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    const pick = (): HTMLElement | null => {
+      const specific = document.querySelector(".card-left-content-miPass") as HTMLElement | null;
+      if (specific) {
+        return (specific.closest(".authorize-card-item") as HTMLElement) || specific;
       }
-    }
-    return null;
+      const cards = Array.from(document.querySelectorAll(".authorize-card-item")) as HTMLElement[];
+      for (const card of cards) {
+        const text = card.textContent || "";
+        if (text.includes("Mi Pass") && !text.includes("Digipass")) return card;
+      }
+      // Fallback: botón/caja con texto Mi Pass
+      const nodes = Array.from(document.querySelectorAll("button, a, [role='button'], .authorize-card-item, .card-left-content-miPass")) as HTMLElement[];
+      for (const el of nodes) {
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (/mi\s*pass/i.test(text) && !/digipass/i.test(text) && text.length < 80) return el;
+      }
+      return null;
+    };
+
+    const el = pick();
+    if (!el) return { ok: false, reason: "not-found" as const };
+
+    el.scrollIntoView({ block: "center", inline: "center" });
+    try { el.focus({ preventScroll: true }); } catch { /* ignore */ }
+
+    const fire = (type: string) => {
+      el.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        buttons: 1,
+      }));
+    };
+    fire("pointerdown");
+    fire("mousedown");
+    fire("mouseup");
+    fire("pointerup");
+    fire("click");
+    // Angular/ng-click a veces escucha el click nativo del elemento.
+    el.click();
+    return { ok: true, reason: "clicked" as const, tag: el.tagName, className: String(el.className || "").slice(0, 120) };
+  });
+
+  const hasMiPassCard = () => page.evaluate(() => {
+    if (document.querySelector(".card-left-content-miPass")) return true;
+    const cards = Array.from(document.querySelectorAll(".authorize-card-item"));
+    return cards.some((card) => {
+      const text = card.textContent || "";
+      return text.includes("Mi Pass") && !text.includes("Digipass");
+    });
   });
 
   // Un solo click a Mi Pass. Reintentos de click disparan otro pagar-express
@@ -861,10 +900,9 @@ export async function ejecutarTransferenciaExpress(
       const ended = await guard.check("pre-mipass-click");
       if (ended) return ended;
     }
-    let rect = await getMiPassRect();
-    if (!rect) {
-      // Esperar un poco a que Angular pinte las cards (sin clickear nada).
-      for (let wait = 0; wait < 5 && !rect; wait++) {
+    let cardReady = await hasMiPassCard();
+    if (!cardReady) {
+      for (let wait = 0; wait < 5 && !cardReady; wait++) {
         await delay(1000);
         const ended = await guard.check(`esperando-card-mipass-${wait + 1}`);
         if (ended) return ended;
@@ -872,18 +910,25 @@ export async function ejecutarTransferenciaExpress(
           miPassActive = true;
           break;
         }
-        rect = await getMiPassRect();
+        cardReady = await hasMiPassCard();
       }
     }
     if (!miPassActive) {
-      if (!rect) {
+      if (!cardReady) {
         const blocked = await guard.check("sin-card-mipass");
         if (blocked) return blocked;
         await capture("sin-card-mipass");
         return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
       }
-      await page.mouse.click(rect.x, rect.y);
+
+      const clickResult = await clickMiPassDom();
+      progress(`Click Mi Pass vía DOM (${clickResult.reason}${clickResult.className ? `: ${clickResult.className}` : ""})`);
+      if (!clickResult.ok && clickResult.reason !== "already-authorizing") {
+        await capture("sin-card-mipass");
+        return { success: false, error: "No se pudo hacer click DOM en TRANSFIERE CON Mi Pass." };
+      }
       await capture("despues-click-mipass");
+
       // Esperar a "AUTORIZANDO CON MI PASS" sin volver a clickear.
       for (let wait = 0; wait < 15 && !miPassActive; wait++) {
         await delay(1000);
