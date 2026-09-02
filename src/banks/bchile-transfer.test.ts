@@ -5,6 +5,7 @@ import {
   INTERMITENCIAS_ERROR,
   isIntermitenciasText,
   isMiPassAuthorizingText,
+  isMiPassChallengeActiveText,
   isSessionFinalizadaText,
   isSistemaErrorText,
   isTefSaldoUrl,
@@ -112,7 +113,7 @@ describe("isSistemaErrorText / detectPortalBlockerText", () => {
   });
 });
 
-describe("isMiPassAuthorizingText", () => {
+describe("isMiPassAuthorizingText / isMiPassChallengeActiveText", () => {
   it("detecta AUTORIZANDO CON MI PASS", () => {
     expect(isMiPassAuthorizingText("← AUTORIZANDO CON MI PASS")).toBe(true);
     expect(isMiPassAuthorizingText("Autorizando con Mi Pass\nEspere aprobación")).toBe(true);
@@ -123,5 +124,18 @@ describe("isMiPassAuthorizingText", () => {
     expect(isMiPassAuthorizingText("AUTORIZA ESTA OPERACIÓN CON TU DISPOSITIVO DE SEGURIDAD\nTRANSFIERE CON\nMi Pass\nDigipass")).toBe(false);
     expect(isMiPassAuthorizingText("Transferencia Express Saldo en Cuenta")).toBe(false);
   });
+
+  it("exige desafío real: título sin cards Mi Pass/Digipass", () => {
+    // Falso positivo de task-41: cambió el h2 pero siguieron las cards.
+    expect(
+      isMiPassChallengeActiveText(
+        "AUTORIZANDO CON MI PASS\nTRANSFIERE CON\nMi Pass\nTRANSFIERE CON\nDigipass",
+      ),
+    ).toBe(false);
+    expect(isMiPassChallengeActiveText("AUTORIZANDO CON MI PASS\nEsperando aprobación en tu dispositivo")).toBe(
+      true,
+    );
+  });
 });
+
 

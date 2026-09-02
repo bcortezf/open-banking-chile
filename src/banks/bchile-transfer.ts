@@ -61,9 +61,8 @@ export function isIntermitenciasText(raw: string): boolean {
 }
 
 /**
- * Tras clickear Mi Pass el portal muestra "AUTORIZANDO CON MI PASS"
- * (desafío enviado al teléfono). Re-clickear en ese estado dispara
- * otro POST pagar-express y suele terminar en intermitencias/SSO roto.
+ * Título "AUTORIZANDO CON MI PASS". Ojo: el portal a veces cambia el h2
+ * sin haber disparado aún el POST pagar-express (falso positivo).
  */
 export function isMiPassAuthorizingText(raw: string): boolean {
   const t = (raw || "").toLowerCase();
@@ -73,6 +72,20 @@ export function isMiPassAuthorizingText(raw: string): boolean {
   // Variante sin espacios raros del DOM
   if (/autorizando\s+con\s+mi\s*pass/i.test(raw || "")) return true;
   return false;
+}
+
+/**
+ * Desafío Mi Pass realmente en curso: título AUTORIZANDO y ya no están
+ * las cards de elección Mi Pass / Digipass.
+ */
+export function isMiPassChallengeActiveText(raw: string): boolean {
+  if (!isMiPassAuthorizingText(raw)) return false;
+  const t = (raw || "").toLowerCase();
+  // Si siguen visibles ambas opciones, el click solo cambió el título.
+  if (t.includes("transfiere con") && t.includes("digipass") && /mi\s*pass/.test(t)) {
+    return false;
+  }
+  return true;
 }
 
 export function detectPortalBlockerText(raw: string): PortalBlockerKind | null {
@@ -809,82 +822,76 @@ export async function ejecutarTransferenciaExpress(
     if (ended) return ended;
   }
 
-  /** True si el desafío ya está en curso (NO re-clickear). */
-  const isMiPassAuthorizing = async (): Promise<boolean> => {
+  /** True si el desafío ya está en curso de verdad (NO re-clickear). */
+  const isMiPassChallengeActive = async (): Promise<boolean> => {
     try {
       const body = await page.evaluate(
         () => (document.body && (document.body.innerText || document.body.textContent || "")) || "",
       );
-      if (isMiPassAuthorizingText(body)) return true;
+      return isMiPassChallengeActiveText(body);
     } catch {
-      // ignore transient nav
+      return false;
     }
-    return page.evaluate(() => {
-      const el = document.querySelector(".minerva-card-secondary-resume.authorize-card");
-      if (!el) return false;
-      const style = window.getComputedStyle(el);
-      if (style.display === "none" || el.classList.contains("ng-hide")) return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    });
   };
 
   /**
-   * Click DOM nativo (HTMLElement.click + eventos) en vez de mouse CDP por coords.
-   * El click sintético de Puppeteer (Input.dispatchMouseEvent) a veces hace que el
-   * POST pagar-express / SSO obrareq falle con intermitencias.
+   * Invoca el ng-click real: cd.seleccionaMiPass('MIPASS;'+serie, true).
+   * Un HTMLElement.click() sintético a veces solo cambia el h2 y NO dispara
+   * POST /tef/pagar-express (por eso no llega el push al teléfono).
    */
-  const clickMiPassDom = () => page.evaluate(() => {
-    const body = (document.body && (document.body.innerText || document.body.textContent || "")) || "";
-    if (/autorizando\s+con\s+mi\s*pass/i.test(body)) {
-      return { ok: false, reason: "already-authorizing" as const };
-    }
+  const triggerMiPassAngular = () => page.evaluate(() => {
+    const w = window as unknown as { angular?: any };
+    if (!w.angular) return { ok: false, reason: "no-angular" as const };
 
-    const pick = (): HTMLElement | null => {
-      const specific = document.querySelector(".card-left-content-miPass") as HTMLElement | null;
-      if (specific) {
-        return (specific.closest(".authorize-card-item") as HTMLElement) || specific;
-      }
-      const cards = Array.from(document.querySelectorAll(".authorize-card-item")) as HTMLElement[];
-      for (const card of cards) {
-        const text = card.textContent || "";
-        if (text.includes("Mi Pass") && !text.includes("Digipass")) return card;
-      }
-      // Fallback: botón/caja con texto Mi Pass
-      const nodes = Array.from(document.querySelectorAll("button, a, [role='button'], .authorize-card-item, .card-left-content-miPass")) as HTMLElement[];
-      for (const el of nodes) {
-        const text = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (/mi\s*pass/i.test(text) && !/digipass/i.test(text) && text.length < 80) return el;
-      }
-      return null;
-    };
-
-    const el = pick();
+    const el =
+      (document.querySelector("section.contenedor-mipass") as HTMLElement | null) ||
+      (document.querySelector(".card-left-content-miPass") as HTMLElement | null) ||
+      (document.querySelector(".authorize-card-item") as HTMLElement | null);
     if (!el) return { ok: false, reason: "not-found" as const };
 
-    el.scrollIntoView({ block: "center", inline: "center" });
-    try { el.focus({ preventScroll: true }); } catch { /* ignore */ }
+    const scope = w.angular.element(el).scope() || w.angular.element(el).isolateScope?.();
+    if (!scope) return { ok: false, reason: "no-scope" as const };
 
-    const fire = (type: string) => {
-      el.dispatchEvent(new MouseEvent(type, {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        buttons: 1,
-      }));
-    };
-    fire("pointerdown");
-    fire("mousedown");
-    fire("mouseup");
-    fire("pointerup");
-    fire("click");
-    // Angular/ng-click a veces escucha el click nativo del elemento.
-    el.click();
-    return { ok: true, reason: "clicked" as const, tag: el.tagName, className: String(el.className || "").slice(0, 120) };
+    // Buscar el controller caja-desafio en el scope chain.
+    let cur: any = scope;
+    let cd: any = null;
+    for (let i = 0; i < 12 && cur; i++) {
+      if (cur.cd && typeof cur.cd.seleccionaMiPass === "function") {
+        cd = cur.cd;
+        break;
+      }
+      cur = cur.$parent;
+    }
+    if (!cd) return { ok: false, reason: "no-cd-controller" as const };
+
+    const devices = Array.isArray(cd.dispositivos) ? cd.dispositivos : [];
+    const device = devices.find((d: any) => String(d?.tipo) === "2") || devices[0];
+    if (!device?.numeroSerie) {
+      return { ok: false, reason: "no-device-serial" as const, devices: devices.length };
+    }
+
+    const key = `MIPASS;${device.numeroSerie}`;
+    try {
+      // Réplica exacta del ng-click del portal.
+      cd.seleccionaMiPass(key, true);
+      cd.mostrarOpcionesDispositivos = !cd.mostrarOpcionesDispositivos;
+      if (typeof scope.$applyAsync === "function") {
+        scope.$applyAsync();
+      } else if (typeof scope.$apply === "function" && !scope.$$phase) {
+        scope.$apply();
+      }
+      return { ok: true, reason: "angular-seleccionaMiPass" as const, key };
+    } catch (e) {
+      return {
+        ok: false,
+        reason: "angular-throw" as const,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
   });
 
   const hasMiPassCard = () => page.evaluate(() => {
-    if (document.querySelector(".card-left-content-miPass")) return true;
+    if (document.querySelector("section.contenedor-mipass, .card-left-content-miPass")) return true;
     const cards = Array.from(document.querySelectorAll(".authorize-card-item"));
     return cards.some((card) => {
       const text = card.textContent || "";
@@ -892,9 +899,9 @@ export async function ejecutarTransferenciaExpress(
     });
   });
 
-  // Un solo click a Mi Pass. Reintentos de click disparan otro pagar-express
+  // Una sola activación Mi Pass. Reintentos disparan otro pagar-express
   // y rompen el SSO (obrareq) → "Presentamos intermitencias".
-  let miPassActive = await isMiPassAuthorizing();
+  let miPassActive = await isMiPassChallengeActive();
   if (!miPassActive) {
     {
       const ended = await guard.check("pre-mipass-click");
@@ -906,7 +913,7 @@ export async function ejecutarTransferenciaExpress(
         await delay(1000);
         const ended = await guard.check(`esperando-card-mipass-${wait + 1}`);
         if (ended) return ended;
-        if (await isMiPassAuthorizing()) {
+        if (await isMiPassChallengeActive()) {
           miPassActive = true;
           break;
         }
@@ -921,22 +928,46 @@ export async function ejecutarTransferenciaExpress(
         return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
       }
 
-      const clickResult = await clickMiPassDom();
-      progress(`Click Mi Pass vía DOM (${clickResult.reason}${clickResult.className ? `: ${clickResult.className}` : ""})`);
-      if (!clickResult.ok && clickResult.reason !== "already-authorizing") {
-        await capture("sin-card-mipass");
-        return { success: false, error: "No se pudo hacer click DOM en TRANSFIERE CON Mi Pass." };
+      // Esperar el POST pagar-express que sí envía el push al teléfono.
+      const pagarWait = page
+        .waitForResponse(
+          (res) => {
+            try {
+              return res.url().includes("/tef-rest/tef/pagar-express");
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 20000 },
+        )
+        .catch(() => null);
+
+      const clickResult = await triggerMiPassAngular();
+      progress(`Activar Mi Pass vía Angular (${clickResult.reason}${clickResult.key ? `: ${clickResult.key}` : ""})`);
+      if (!clickResult.ok) {
+        await capture("mipass-angular-fail");
+        return {
+          success: false,
+          error: `No se pudo invocar seleccionaMiPass en Angular (${clickResult.reason}).`,
+        };
       }
       await capture("despues-click-mipass");
 
-      // Esperar a "AUTORIZANDO CON MI PASS" sin volver a clickear.
+      const pagarRes = await pagarWait;
+      if (pagarRes) {
+        progress(`POST pagar-express → HTTP ${pagarRes.status()}`);
+      } else {
+        progress("POST pagar-express no observado en 20s (puede haber fallado el desafío)");
+      }
+
+      // Esperar desafío real (título + sin cards) sin volver a activar.
       for (let wait = 0; wait < 15 && !miPassActive; wait++) {
         await delay(1000);
         {
           const ended = await guard.check(`post-mipass-click-${wait + 1}`);
           if (ended) return ended;
         }
-        miPassActive = await isMiPassAuthorizing();
+        miPassActive = await isMiPassChallengeActive();
       }
     }
   }
