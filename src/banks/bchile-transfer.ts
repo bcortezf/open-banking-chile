@@ -4,6 +4,47 @@ import { delay } from "../utils.js";
 
 export type TransferShotFn = (page: Page, name: string) => Promise<void>;
 
+export const SESSION_FINALIZADA_ERROR =
+  "La sesión del portal fue finalizada. Vuelva a intentar la transferencia.";
+
+/** Detecta el modal/texto "Sesión Finalizada" del portal empresas. */
+export function isSessionFinalizadaText(raw: string): boolean {
+  const t = (raw || "").toLowerCase();
+  if (!t) return false;
+  if (t.includes("sesión finalizada") || t.includes("sesion finalizada")) return true;
+  if (t.includes("la sesión fue finalizada") || t.includes("la sesion fue finalizada")) return true;
+  if (t.includes("debe volver a ingresar") && t.includes("reingresar")) return true;
+  return false;
+}
+
+async function pageShowsSessionFinalizada(page: Page): Promise<boolean> {
+  return page.evaluate((patterns) => {
+    const body = ((document.body && (document.body.innerText || document.body.textContent)) || "").toLowerCase();
+    if (patterns.some((p) => body.includes(p))) return true;
+    const modal = Array.from(document.querySelectorAll("[role='dialog'], .modal, .cdk-overlay-pane, .swal2-popup, .ui-dialog"))
+      .map((el) => (el.textContent || "").toLowerCase())
+      .join(" ");
+    return patterns.some((p) => modal.includes(p));
+  }, [
+    "sesión finalizada",
+    "sesion finalizada",
+    "la sesión fue finalizada",
+    "la sesion fue finalizada",
+  ]);
+}
+
+async function failIfSessionFinalizada(
+  page: Page,
+  capture: (name: string) => Promise<void>,
+  debugLog: string[],
+  step: string,
+): Promise<TransferenciaResult | null> {
+  if (!(await pageShowsSessionFinalizada(page))) return null;
+  debugLog.push(`  Sesión finalizada detectada en: ${step}`);
+  await capture(`sesion-finalizada-${step}`);
+  return { success: false, error: SESSION_FINALIZADA_ERROR };
+}
+
 export async function dumpDestinatarioDebug(page: Page, debugLog: string[]): Promise<Record<string, unknown>> {
   const dump = await page.evaluate(() => {
     const rows = Array.from(
@@ -93,10 +134,19 @@ export async function ejecutarTransferenciaExpress(
   }
   await delay(3000);
 
+  {
+    const ended = await failIfSessionFinalizada(page, capture, debugLog, "post-nav");
+    if (ended) return ended;
+  }
+
   let formReady = await page.evaluate(() => document.querySelectorAll(".ui-select-container").length >= 2);
   if (!formReady) {
     await delay(5000);
     formReady = await page.evaluate(() => document.querySelectorAll(".ui-select-container").length >= 2);
+  }
+  {
+    const ended = await failIfSessionFinalizada(page, capture, debugLog, "form-load");
+    if (ended) return ended;
   }
   if (!formReady) {
     await capture("form-no-cargo");
@@ -129,6 +179,10 @@ export async function ejecutarTransferenciaExpress(
     await capture("cuenta-origen-seleccionada");
   } else {
     await capture("cuenta-origen-preseleccionada");
+  }
+  {
+    const ended = await failIfSessionFinalizada(page, capture, debugLog, "cuenta-origen");
+    if (ended) return ended;
   }
 
   progress("Seleccionando beneficiario...");
@@ -252,6 +306,10 @@ export async function ejecutarTransferenciaExpress(
   }
 
   if (!beneficiaryFound) {
+    {
+      const ended = await failIfSessionFinalizada(page, capture, debugLog, "beneficiario");
+      if (ended) return ended;
+    }
     await dumpDestinatarioDebug(page, debugLog);
     await capture("beneficiario-no-encontrado");
     return {
@@ -263,6 +321,10 @@ export async function ejecutarTransferenciaExpress(
   await delay(1000);
 
   progress("Ingresando monto...");
+  {
+    const ended = await failIfSessionFinalizada(page, capture, debugLog, "pre-monto");
+    if (ended) return ended;
+  }
   const montoInput = await page.$("#monto");
   if (!montoInput) {
     await capture("sin-campo-monto");
@@ -308,13 +370,9 @@ export async function ejecutarTransferenciaExpress(
   }
   await delay(2000);
   await capture("despues-click-transferir");
-
-  const sessionEnded = await page.evaluate(() => {
-    const t = ((document.body && document.body.innerText) || "").toLowerCase();
-    return t.includes("sesión finalizada") || t.includes("sesion finalizada");
-  });
-  if (sessionEnded) {
-    return { success: false, error: "La sesión del portal fue finalizada. Reintente." };
+  {
+    const ended = await failIfSessionFinalizada(page, capture, debugLog, "post-transferir");
+    if (ended) return ended;
   }
 
   progress("Seleccionando Mi Pass...");
@@ -425,7 +483,8 @@ export async function ejecutarTransferenciaExpress(
     const result = await detectPageState();
     const elapsed = Math.round((Date.now() - miPassStart) / 1000);
     if (result.state === "session_ended") {
-      return { success: false, error: "La sesión del portal fue finalizada. Reintente." };
+      await capture("sesion-finalizada-mipass");
+      return { success: false, error: SESSION_FINALIZADA_ERROR };
     }
     if (result.state === "error_intermitency") {
       return { success: false, error: result.message || "El banco presentó intermitencias." };
