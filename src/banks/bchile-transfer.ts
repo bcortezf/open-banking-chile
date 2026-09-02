@@ -229,8 +229,25 @@ async function navigateToExpressForm(
   debugLog: string[],
 ): Promise<TransferenciaResult | null> {
   progress("Navegando al formulario de transferencia express...");
+
+  // Preferir SPA hash (mismo documento) o menú: un page.goto completo a Express
+  // a veces cae en contingencia/500 y mata la sesión (fingerprint / WAF).
+  const currentUrl = page.url();
+  const alreadyInPortal =
+    currentUrl.includes("portalempresas.bancochile.cl/mibancochile-web")
+    || currentUrl.includes("#/home")
+    || currentUrl.includes("#/portal/");
+
   try {
-    await page.goto(TRANSFER_EXPRESS_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    if (alreadyInPortal) {
+      debugLog.push("  Navegación Express vía hash SPA (sin reload completo)");
+      await page.evaluate((hash) => {
+        window.location.hash = hash;
+      }, "#/portal/tefTransferencias/PreInscribir/Express");
+    } else {
+      debugLog.push("  Navegación Express vía goto (fuera del portal)");
+      await page.goto(TRANSFER_EXPRESS_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
   } catch {
     // SPA hash navigation often throws / doesn't settle like a full load
   }
@@ -246,6 +263,55 @@ async function navigateToExpressForm(
     }
     await delay(400);
   }
+
+  // Fallback: intentar menú UI (más parecido a un humano).
+  debugLog.push("  Shell no visible; intentando menú Pagos y Transferencias...");
+  try {
+    const clicked = await safeEvaluate(
+      page,
+      () => {
+        const items = Array.from(document.querySelectorAll("a, button, span, li"));
+        const pagos = items.find((el) => /pagos y transferencias/i.test((el.textContent || "").trim()));
+        if (pagos) {
+          (pagos as HTMLElement).click();
+          return "pagos";
+        }
+        return null;
+      },
+      null as string | null,
+    );
+    if (clicked) {
+      await delay(800);
+      await safeEvaluate(
+        page,
+        () => {
+          const links = Array.from(document.querySelectorAll("a, button, span"));
+          const express = links.find((el) => /transferencia express/i.test((el.textContent || "").trim()));
+          if (express) {
+            (express as HTMLElement).click();
+            return true;
+          }
+          return false;
+        },
+        false,
+      );
+      await delay(1500);
+    }
+  } catch {
+    // ignore menu fallback errors
+  }
+
+  const started2 = Date.now();
+  while (Date.now() - started2 < 15000) {
+    const ended = await guard.check("nav-express-menu");
+    if (ended) return ended;
+    if (await pageShowsExpressShell(page)) {
+      debugLog.push("  Shell Transferencia Express visible (vía menú)");
+      return null;
+    }
+    await delay(400);
+  }
+
   debugLog.push("  Timeout esperando shell de Transferencia Express");
   return { success: false, error: "No cargó la vista Transferencia Express." };
 }

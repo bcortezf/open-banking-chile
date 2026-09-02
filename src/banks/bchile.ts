@@ -2274,19 +2274,18 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
         };
       }
 
+      const { STEALTH_IGNORE_DEFAULT_ARGS, STEALTH_LAUNCH_ARGS, applyStealth } = await import("../infrastructure/stealth.js");
       browser = await puppeteer.launch({
         executablePath,
         headless: !headful,
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
+        ignoreDefaultArgs: STEALTH_IGNORE_DEFAULT_ARGS,
+        args: [...STEALTH_LAUNCH_ARGS],
       });
 
       page = await browser.newPage();
-      await page.setViewport({ width: 1280, height: 900 });
-      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
-
-      await page.evaluateOnNewDocument(() => {
-        Object.defineProperty(navigator, "webdriver", { get: () => false });
-      });
+      await page.setViewport({ width: 1366, height: 768 });
+      // UA nativo del Chrome instalado + parches anti-webdriver (evita mismatch Win/Linux).
+      await applyStealth(page);
     }
 
     // Acciones: listar cuentas / listar beneficiarios / agregar beneficiario
