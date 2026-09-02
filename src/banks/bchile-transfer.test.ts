@@ -3,6 +3,7 @@ import {
   EXPRESS_NOT_READY_ERROR,
   isSessionFinalizadaText,
   isTefSaldoUrl,
+  isTransientNavError,
   pageHasSaldoEnCuentaText,
   SESSION_FINALIZADA_ERROR,
 } from "./bchile-transfer.js";
@@ -56,5 +57,13 @@ describe("isTefSaldoUrl", () => {
 
   it("expone error de sección no lista", () => {
     expect(EXPRESS_NOT_READY_ERROR).toMatch(/Saldo en Cuenta/i);
+  });
+});
+
+describe("isTransientNavError", () => {
+  it("reconoce context destroyed / target closed", () => {
+    expect(isTransientNavError(new Error("Execution context was destroyed, most likely because of a navigation."))).toBe(true);
+    expect(isTransientNavError(new Error("Protocol error (Page.captureScreenshot): Target closed"))).toBe(true);
+    expect(isTransientNavError(new Error("No se encontró el beneficiario"))).toBe(false);
   });
 });

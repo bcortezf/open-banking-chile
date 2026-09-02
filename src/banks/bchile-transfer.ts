@@ -33,27 +33,75 @@ export function isTefSaldoUrl(url: string): boolean {
   return (url || "").includes(TEF_SALDO_PATH);
 }
 
+/** Errores típicos de Puppeteer cuando Angular navega / recrea el frame. */
+export function isTransientNavError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Execution context was destroyed|Target closed|Navigating frame|frame was detached|Cannot find context|Protocol error/i.test(msg);
+}
+
+async function safeEvaluate<T>(
+  page: Page,
+  fn: (...args: never[]) => T | Promise<T>,
+  fallback: T,
+  arg?: unknown,
+): Promise<T> {
+  try {
+    if (arg !== undefined) {
+      return await page.evaluate(fn as (arg: unknown) => T | Promise<T>, arg);
+    }
+    return await page.evaluate(fn as () => T | Promise<T>);
+  } catch (err) {
+    if (isTransientNavError(err)) return fallback;
+    throw err;
+  }
+}
+
 async function pageShowsSessionFinalizada(page: Page): Promise<boolean> {
-  return page.evaluate((patterns) => {
-    const body = ((document.body && (document.body.innerText || document.body.textContent)) || "").toLowerCase();
-    if (patterns.some((p) => body.includes(p))) return true;
-    const modal = Array.from(document.querySelectorAll("[role='dialog'], .modal, .cdk-overlay-pane, .swal2-popup, .ui-dialog"))
-      .map((el) => (el.textContent || "").toLowerCase())
-      .join(" ");
-    return patterns.some((p) => modal.includes(p));
-  }, [
-    "sesión finalizada",
-    "sesion finalizada",
-    "la sesión fue finalizada",
-    "la sesion fue finalizada",
-  ]);
+  return safeEvaluate(
+    page,
+    (patterns: string[]) => {
+      const body = ((document.body && (document.body.innerText || document.body.textContent)) || "").toLowerCase();
+      if (patterns.some((p) => body.includes(p))) return true;
+      const modal = Array.from(document.querySelectorAll("[role='dialog'], .modal, .cdk-overlay-pane, .swal2-popup, .ui-dialog"))
+        .map((el) => (el.textContent || "").toLowerCase())
+        .join(" ");
+      return patterns.some((p) => modal.includes(p));
+    },
+    false,
+    [
+      "sesión finalizada",
+      "sesion finalizada",
+      "la sesión fue finalizada",
+      "la sesion fue finalizada",
+    ],
+  );
 }
 
 async function pageShowsSaldoEnCuenta(page: Page): Promise<boolean> {
-  return page.evaluate(() => {
-    const body = (document.body && (document.body.innerText || document.body.textContent)) || "";
-    return /saldo\s+en\s+cuenta\s*:/i.test(body);
-  });
+  return safeEvaluate(
+    page,
+    () => {
+      const body = (document.body && (document.body.innerText || document.body.textContent)) || "";
+      return /saldo\s+en\s+cuenta\s*:/i.test(body);
+    },
+    false,
+  );
+}
+
+async function pageShowsExpressShell(page: Page): Promise<boolean> {
+  return safeEvaluate(
+    page,
+    () => {
+      const t = (document.body && (document.body.innerText || document.body.textContent)) || "";
+      if (/sesión finalizada|sesion finalizada/i.test(t)) return true;
+      return (
+        t.includes("Transferencia Express")
+        || t.includes("Datos de la Transferencia")
+        || document.querySelectorAll(".ui-select-container").length >= 1
+      );
+    },
+    false,
+  );
 }
 
 /**
@@ -95,14 +143,51 @@ class SessionGuard {
 
   async check(step?: string): Promise<TransferenciaResult | null> {
     if (step) this.lastStep = step;
-    if (this.ended || (await pageShowsSessionFinalizada(this.page))) {
-      this.ended = true;
-      this.debugLog.push(`  Sesión finalizada detectada en: ${this.lastStep}`);
-      await this.capture(`sesion-finalizada-${this.lastStep}`);
-      return { success: false, error: SESSION_FINALIZADA_ERROR };
+    try {
+      if (this.ended || (await pageShowsSessionFinalizada(this.page))) {
+        this.ended = true;
+        this.debugLog.push(`  Sesión finalizada detectada en: ${this.lastStep}`);
+        try {
+          await this.capture(`sesion-finalizada-${this.lastStep}`);
+        } catch {
+          // ignore screenshot failures during teardown/nav
+        }
+        return { success: false, error: SESSION_FINALIZADA_ERROR };
+      }
+    } catch (err) {
+      if (isTransientNavError(err)) return null;
+      throw err;
     }
     return null;
   }
+}
+
+async function navigateToExpressForm(
+  page: Page,
+  guard: SessionGuard,
+  progress: (step: string) => void,
+  debugLog: string[],
+): Promise<TransferenciaResult | null> {
+  progress("Navegando al formulario de transferencia express...");
+  try {
+    await page.goto(TRANSFER_EXPRESS_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch {
+    // SPA hash navigation often throws / doesn't settle like a full load
+  }
+
+  // La SPA deja pantalla en blanco un momento; no evaluar hasta ver el shell.
+  const started = Date.now();
+  while (Date.now() - started < 30000) {
+    const ended = await guard.check("nav-express");
+    if (ended) return ended;
+    if (await pageShowsExpressShell(page)) {
+      debugLog.push("  Shell Transferencia Express visible");
+      return null;
+    }
+    await delay(400);
+  }
+  debugLog.push("  Timeout esperando shell de Transferencia Express");
+  return { success: false, error: "No cargó la vista Transferencia Express." };
 }
 
 async function waitForExpressSaldoReady(
@@ -131,55 +216,69 @@ async function waitForExpressSaldoReady(
   let originKickTried = false;
   try {
     while (Date.now() - started < timeoutMs) {
-      const ended = await guard.check("espera-saldo");
-      if (ended) return ended;
+      try {
+        const ended = await guard.check("espera-saldo");
+        if (ended) return ended;
 
-      if (await pageShowsSaldoEnCuenta(page)) {
-        debugLog.push(
-          `  Express listo: "Saldo en Cuenta:" visible` +
-            (saldoResponseSeen ? " (request tef/saldo OK)" : ""),
-        );
-        return null;
-      }
-
-      // Si ya llegó la API, dale un poco más al DOM Angular.
-      if (saldoResponseSeen) {
-        await delay(800);
         if (await pageShowsSaldoEnCuenta(page)) {
-          debugLog.push('  Express listo: "Saldo en Cuenta:" tras response tef/saldo');
+          debugLog.push(
+            `  Express listo: "Saldo en Cuenta:" visible` +
+              (saldoResponseSeen ? " (request tef/saldo OK)" : ""),
+          );
           return null;
         }
-      }
 
-      // El banco suele disparar tef/saldo al elegir cuenta de origen. Si el skeleton
-      // ya está y aún no hay saldo, una sola selección kick-start (sin tocar beneficiario).
-      if (!originKickTried && !saldoResponseSeen && Date.now() - started > 8000) {
-        const kicked = await page.evaluate(() => {
-          const containers = document.querySelectorAll(".ui-select-container");
-          if (containers.length < 2) return false;
-          const match = containers[1].querySelector(".ui-select-match") as HTMLElement | null;
-          const current = ((match && match.textContent) || "").trim();
-          if (current.length > 5 && (current.includes("CUENTA") || current.includes("Saldo") || /\d{2,}/.test(current))) {
-            return false;
-          }
-          if (match) {
-            match.scrollIntoView({ block: "center" });
-            match.click();
-          }
-          return true;
-        });
-        originKickTried = true;
-        if (kicked) {
-          debugLog.push("  Kick: abriendo cuenta de origen para disparar tef/saldo");
+        // Si ya llegó la API, dale un poco más al DOM Angular.
+        if (saldoResponseSeen) {
           await delay(800);
-          await page.evaluate(() => {
-            const options = Array.from(
-              document.querySelectorAll(".ui-select-choices-row > a, .ui-select-choices-row-inner > a"),
-            );
-            if (options.length > 0) (options[0] as HTMLElement).click();
-          });
-          await delay(1000);
+          if (await pageShowsSaldoEnCuenta(page)) {
+            debugLog.push('  Express listo: "Saldo en Cuenta:" tras response tef/saldo');
+            return null;
+          }
         }
+
+        // El banco suele disparar tef/saldo al elegir cuenta de origen. Si el skeleton
+        // ya está y aún no hay saldo, una sola selección kick-start (sin tocar beneficiario).
+        if (!originKickTried && !saldoResponseSeen && Date.now() - started > 8000) {
+          const kicked = await safeEvaluate(
+            page,
+            () => {
+              const containers = document.querySelectorAll(".ui-select-container");
+              if (containers.length < 2) return false;
+              const match = containers[1].querySelector(".ui-select-match") as HTMLElement | null;
+              const current = ((match && match.textContent) || "").trim();
+              if (current.length > 5 && (current.includes("CUENTA") || current.includes("Saldo") || /\d{2,}/.test(current))) {
+                return false;
+              }
+              if (match) {
+                match.scrollIntoView({ block: "center" });
+                match.click();
+              }
+              return true;
+            },
+            false,
+          );
+          originKickTried = true;
+          if (kicked) {
+            debugLog.push("  Kick: abriendo cuenta de origen para disparar tef/saldo");
+            await delay(800);
+            await safeEvaluate(
+              page,
+              () => {
+                const options = Array.from(
+                  document.querySelectorAll(".ui-select-choices-row > a, .ui-select-choices-row-inner > a"),
+                );
+                if (options.length > 0) (options[0] as HTMLElement).click();
+                return true;
+              },
+              false,
+            );
+            await delay(1000);
+          }
+        }
+      } catch (err) {
+        if (!isTransientNavError(err)) throw err;
+        debugLog.push("  Nav transient durante espera de saldo; reintentando...");
       }
 
       await delay(500);
@@ -278,14 +377,14 @@ export async function ejecutarTransferenciaExpress(
   guard.start();
 
   try {
-  progress(`Navegando al formulario de transferencia express (***${lastThreeDigits})...`);
-
-  try {
-    await page.goto(TRANSFER_EXPRESS_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-  } catch {
-    // SPA hash navigation
+  {
+    const navFailed = await navigateToExpressForm(page, guard, progress, debugLog);
+    if (navFailed) {
+      await capture("express-shell-no-cargo").catch(() => undefined);
+      return navFailed;
+    }
   }
-  await delay(1500);
+  debugLog.push(`  Destino TEF ***${lastThreeDigits}`);
   {
     const ended = await guard.check("post-nav");
     if (ended) return ended;
@@ -295,11 +394,11 @@ export async function ejecutarTransferenciaExpress(
   {
     const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog);
     if (notReady) {
-      await capture("express-sin-saldo-en-cuenta");
+      await capture("express-sin-saldo-en-cuenta").catch(() => undefined);
       return notReady;
     }
   }
-  await capture("formulario-listo-con-saldo");
+  await capture("formulario-listo-con-saldo").catch(() => undefined);
 
   // Si por alguna razón aún no hay cuenta de origen seleccionada, elegir la primera.
   const originSelected = await page.evaluate(() => {
