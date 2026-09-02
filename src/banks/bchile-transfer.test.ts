@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   EXPRESS_NOT_READY_ERROR,
+  detectPortalBlockerText,
   isSessionFinalizadaText,
+  isSistemaErrorText,
   isTefSaldoUrl,
   isTransientNavError,
   pageHasSaldoEnCuentaText,
   SESSION_FINALIZADA_ERROR,
+  SISTEMA_ERROR,
 } from "./bchile-transfer.js";
 
 describe("isSessionFinalizadaText", () => {
@@ -65,5 +68,30 @@ describe("isTransientNavError", () => {
     expect(isTransientNavError(new Error("Execution context was destroyed, most likely because of a navigation."))).toBe(true);
     expect(isTransientNavError(new Error("Protocol error (Page.captureScreenshot): Target closed"))).toBe(true);
     expect(isTransientNavError(new Error("No se encontró el beneficiario"))).toBe(false);
+  });
+});
+
+describe("isSistemaErrorText / detectPortalBlockerText", () => {
+  it("detecta Error de Sistema del banco", () => {
+    const page = `
+      Error de Sistema
+      Este servicio está temporalmente no disponible. Por favor intente más tarde.
+      [Error = 500]
+      Ir a Portal Empresa
+    `;
+    expect(isSistemaErrorText(page)).toBe(true);
+    expect(detectPortalBlockerText(page)).toBe("sistema_error");
+    expect(SISTEMA_ERROR).toMatch(/Error de Sistema/i);
+  });
+
+  it("prioriza Sesión Finalizada sobre otros textos", () => {
+    expect(detectPortalBlockerText("Sesión Finalizada. Debe volver a ingresar. REINGRESAR")).toBe(
+      "session_finalizada",
+    );
+  });
+
+  it("no marca falsos positivos en TEF normal", () => {
+    expect(isSistemaErrorText("Transferencia Express Saldo en Cuenta: $1.000")).toBe(false);
+    expect(detectPortalBlockerText("Transferencia Express Datos de la Transferencia")).toBe(null);
   });
 });

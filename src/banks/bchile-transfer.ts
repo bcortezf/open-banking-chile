@@ -7,12 +7,17 @@ export type TransferShotFn = (page: Page, name: string) => Promise<void>;
 export const SESSION_FINALIZADA_ERROR =
   "La sesión del portal fue finalizada. Vuelva a intentar la transferencia.";
 
+export const SISTEMA_ERROR =
+  "El portal del banco respondió Error de Sistema (servicio temporalmente no disponible). Reintente más tarde.";
+
 export const EXPRESS_NOT_READY_ERROR =
   "La sección Transferencia Express no quedó lista: no apareció el bloque \"Saldo en Cuenta:\".";
 
 const TEF_SALDO_PATH = "/tef-rest/tef/saldo";
 const EXPRESS_READY_TIMEOUT_MS = 60000;
-const SESSION_WATCH_INTERVAL_MS = 1000;
+const PORTAL_WATCH_INTERVAL_MS = 1000;
+
+export type PortalBlockerKind = "session_finalizada" | "sistema_error";
 
 /** Detecta el modal/texto "Sesión Finalizada" del portal empresas. */
 export function isSessionFinalizadaText(raw: string): boolean {
@@ -22,6 +27,36 @@ export function isSessionFinalizadaText(raw: string): boolean {
   if (t.includes("la sesión fue finalizada") || t.includes("la sesion fue finalizada")) return true;
   if (t.includes("debe volver a ingresar") && t.includes("reingresar")) return true;
   return false;
+}
+
+/**
+ * Detecta la página "Error de Sistema" del banco
+ * (ej. "Este servicio está temporalmente no disponible... [Error = 500]").
+ */
+export function isSistemaErrorText(raw: string): boolean {
+  const t = (raw || "").toLowerCase();
+  if (!t) return false;
+  if (t.includes("error de sistema")) return true;
+  if (t.includes("temporalmente no disponible") && (t.includes("error = 500") || t.includes("error=500"))) {
+    return true;
+  }
+  if (t.includes("ir a portal empresa") && t.includes("no disponible")) return true;
+  return false;
+}
+
+export function detectPortalBlockerText(raw: string): PortalBlockerKind | null {
+  if (isSessionFinalizadaText(raw)) return "session_finalizada";
+  if (isSistemaErrorText(raw)) return "sistema_error";
+  return null;
+}
+
+function blockerErrorMessage(kind: PortalBlockerKind): string {
+  return kind === "sistema_error" ? SISTEMA_ERROR : SESSION_FINALIZADA_ERROR;
+}
+
+function blockerScreenshotName(kind: PortalBlockerKind, step: string): string {
+  const prefix = kind === "sistema_error" ? "error-sistema" : "sesion-finalizada";
+  return `${prefix}-${step}`;
 }
 
 /** True si el formulario Express ya muestra el saldo de la cuenta de origen. */
@@ -56,24 +91,35 @@ async function safeEvaluate<T>(
   }
 }
 
-async function pageShowsSessionFinalizada(page: Page): Promise<boolean> {
+async function pageDetectPortalBlocker(page: Page): Promise<PortalBlockerKind | null> {
   return safeEvaluate(
     page,
-    (patterns: string[]) => {
-      const body = ((document.body && (document.body.innerText || document.body.textContent)) || "").toLowerCase();
-      if (patterns.some((p) => body.includes(p))) return true;
+    () => {
+      const body = ((document.body && (document.body.innerText || document.body.textContent)) || "");
       const modal = Array.from(document.querySelectorAll("[role='dialog'], .modal, .cdk-overlay-pane, .swal2-popup, .ui-dialog"))
-        .map((el) => (el.textContent || "").toLowerCase())
+        .map((el) => (el.textContent || ""))
         .join(" ");
-      return patterns.some((p) => modal.includes(p));
+      const raw = `${body}\n${modal}`;
+      const t = raw.toLowerCase();
+      if (
+        t.includes("sesión finalizada")
+        || t.includes("sesion finalizada")
+        || t.includes("la sesión fue finalizada")
+        || t.includes("la sesion fue finalizada")
+        || (t.includes("debe volver a ingresar") && t.includes("reingresar"))
+      ) {
+        return "session_finalizada";
+      }
+      if (
+        t.includes("error de sistema")
+        || (t.includes("temporalmente no disponible") && (t.includes("error = 500") || t.includes("error=500")))
+        || (t.includes("ir a portal empresa") && t.includes("no disponible"))
+      ) {
+        return "sistema_error";
+      }
+      return null;
     },
-    false,
-    [
-      "sesión finalizada",
-      "sesion finalizada",
-      "la sesión fue finalizada",
-      "la sesion fue finalizada",
-    ],
+    null,
   );
 }
 
@@ -93,7 +139,6 @@ async function pageShowsExpressShell(page: Page): Promise<boolean> {
     page,
     () => {
       const t = (document.body && (document.body.innerText || document.body.textContent)) || "";
-      if (/sesión finalizada|sesion finalizada/i.test(t)) return true;
       return (
         t.includes("Transferencia Express")
         || t.includes("Datos de la Transferencia")
@@ -105,10 +150,11 @@ async function pageShowsExpressShell(page: Page): Promise<boolean> {
 }
 
 /**
- * Vigilancia continua de "Sesión Finalizada" (puede aparecer en cualquier momento / overlay).
+ * Vigilancia continua de bloqueos del portal (Sesión Finalizada / Error de Sistema).
+ * Puede aparecer en cualquier momento u overlay.
  */
-class SessionGuard {
-  private ended = false;
+class PortalGuard {
+  private blocker: PortalBlockerKind | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastStep = "watch";
 
@@ -121,12 +167,12 @@ class SessionGuard {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      pageShowsSessionFinalizada(this.page)
+      pageDetectPortalBlocker(this.page)
         .then((hit) => {
-          if (hit) this.ended = true;
+          if (hit) this.blocker = hit;
         })
         .catch(() => undefined);
-    }, SESSION_WATCH_INTERVAL_MS);
+    }, PORTAL_WATCH_INTERVAL_MS);
     if (typeof this.timer.unref === "function") this.timer.unref();
   }
 
@@ -144,23 +190,25 @@ class SessionGuard {
   async check(step?: string): Promise<TransferenciaResult | null> {
     if (step) this.lastStep = step;
     try {
-      if (this.ended || (await pageShowsSessionFinalizada(this.page))) {
-        this.ended = true;
-        this.debugLog.push(`  Sesión finalizada detectada en: ${this.lastStep}`);
-        try {
-          await this.capture(`sesion-finalizada-${this.lastStep}`);
-        } catch {
-          // ignore screenshot failures during teardown/nav
-        }
-        return { success: false, error: SESSION_FINALIZADA_ERROR };
+      const hit = this.blocker || (await pageDetectPortalBlocker(this.page));
+      if (!hit) return null;
+      this.blocker = hit;
+      this.debugLog.push(`  Bloqueo portal (${hit}) detectado en: ${this.lastStep}`);
+      try {
+        await this.capture(blockerScreenshotName(hit, this.lastStep));
+      } catch {
+        // ignore screenshot failures during teardown/nav
       }
+      return { success: false, error: blockerErrorMessage(hit) };
     } catch (err) {
       if (isTransientNavError(err)) return null;
       throw err;
     }
-    return null;
   }
 }
+
+/** @deprecated alias — prefer PortalGuard */
+const SessionGuard = PortalGuard;
 
 async function navigateToExpressForm(
   page: Page,
@@ -195,10 +243,12 @@ async function waitForExpressSaldoReady(
   guard: SessionGuard,
   progress: (step: string) => void,
   debugLog: string[],
+  capture: (name: string) => Promise<void>,
   timeoutMs = EXPRESS_READY_TIMEOUT_MS,
 ): Promise<TransferenciaResult | null> {
   progress('Esperando bloque "Saldo en Cuenta:" (requests de fondo)...');
   guard.markStep("espera-saldo");
+  await capture("espera-saldo-inicio").catch(() => undefined);
 
   let saldoResponseSeen = false;
   const onResponse = (response: { url: () => string; status: () => number }) => {
@@ -214,11 +264,19 @@ async function waitForExpressSaldoReady(
 
   const started = Date.now();
   let originKickTried = false;
+  let lastShotAt = 0;
+  const SHOT_EVERY_MS = 5000;
   try {
     while (Date.now() - started < timeoutMs) {
       try {
         const ended = await guard.check("espera-saldo");
         if (ended) return ended;
+
+        const elapsedSec = Math.floor((Date.now() - started) / 1000);
+        if (Date.now() - lastShotAt >= SHOT_EVERY_MS) {
+          lastShotAt = Date.now();
+          await capture(`espera-saldo-${elapsedSec}s`).catch(() => undefined);
+        }
 
         if (await pageShowsSaldoEnCuenta(page)) {
           debugLog.push(
@@ -261,6 +319,7 @@ async function waitForExpressSaldoReady(
           originKickTried = true;
           if (kicked) {
             debugLog.push("  Kick: abriendo cuenta de origen para disparar tef/saldo");
+            await capture("espera-saldo-kick-origen").catch(() => undefined);
             await delay(800);
             await safeEvaluate(
               page,
@@ -285,6 +344,12 @@ async function waitForExpressSaldoReady(
     }
   } finally {
     page.off("response", onResponse);
+  }
+
+  // Antes de fallar por timeout, si el portal ya muestra Error de Sistema / sesión, reportar eso.
+  {
+    const blocked = await guard.check("espera-saldo-timeout");
+    if (blocked) return blocked;
   }
 
   debugLog.push(
@@ -392,7 +457,7 @@ export async function ejecutarTransferenciaExpress(
 
   // No interactuar hasta que la vista Express esté usable (bloque Saldo en Cuenta: / tef/saldo).
   {
-    const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog);
+    const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog, capture);
     if (notReady) {
       await capture("express-sin-saldo-en-cuenta").catch(() => undefined);
       return notReady;
@@ -429,7 +494,7 @@ export async function ejecutarTransferenciaExpress(
     await delay(500);
     // Tras elegir origen, el banco vuelve a pedir saldo.
     {
-      const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog, 30000);
+      const notReady = await waitForExpressSaldoReady(page, guard, progress, debugLog, capture, 30000);
       if (notReady) {
         await capture("express-sin-saldo-post-origen");
         return notReady;
