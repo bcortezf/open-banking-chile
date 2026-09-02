@@ -60,6 +60,21 @@ export function isIntermitenciasText(raw: string): boolean {
   return false;
 }
 
+/**
+ * Tras clickear Mi Pass el portal muestra "AUTORIZANDO CON MI PASS"
+ * (desafío enviado al teléfono). Re-clickear en ese estado dispara
+ * otro POST pagar-express y suele terminar en intermitencias/SSO roto.
+ */
+export function isMiPassAuthorizingText(raw: string): boolean {
+  const t = (raw || "").toLowerCase();
+  if (!t) return false;
+  if (t.includes("autorizando con mi pass")) return true;
+  if (t.includes("autorizando con mipass")) return true;
+  // Variante sin espacios raros del DOM
+  if (/autorizando\s+con\s+mi\s*pass/i.test(raw || "")) return true;
+  return false;
+}
+
 export function detectPortalBlockerText(raw: string): PortalBlockerKind | null {
   if (isSessionFinalizadaText(raw)) return "session_finalizada";
   if (isIntermitenciasText(raw)) return "intermitencias";
@@ -793,16 +808,32 @@ export async function ejecutarTransferenciaExpress(
     const ended = await guard.check("pre-mipass");
     if (ended) return ended;
   }
-  const isMiPassActivated = () => page.evaluate(() => {
-    const el = document.querySelector(".minerva-card-secondary-resume.authorize-card");
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === "none" || el.classList.contains("ng-hide")) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  });
+
+  /** True si el desafío ya está en curso (NO re-clickear). */
+  const isMiPassAuthorizing = async (): Promise<boolean> => {
+    try {
+      const body = await page.evaluate(
+        () => (document.body && (document.body.innerText || document.body.textContent || "")) || "",
+      );
+      if (isMiPassAuthorizingText(body)) return true;
+    } catch {
+      // ignore transient nav
+    }
+    return page.evaluate(() => {
+      const el = document.querySelector(".minerva-card-secondary-resume.authorize-card");
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || el.classList.contains("ng-hide")) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+  };
 
   const getMiPassRect = () => page.evaluate(() => {
+    // Si ya está autorizando, no devolver coords para click.
+    const body = (document.body && (document.body.innerText || document.body.textContent || "")) || "";
+    if (/autorizando\s+con\s+mi\s*pass/i.test(body)) return null;
+
     const specific = document.querySelector(".card-left-content-miPass");
     if (specific) {
       const parent = (specific.closest(".authorize-card-item") || specific) as HTMLElement;
@@ -822,47 +853,45 @@ export async function ejecutarTransferenciaExpress(
     return null;
   });
 
-  let miPassActive = false;
-  for (let attempt = 1; attempt <= 4 && !miPassActive; attempt++) {
+  // Un solo click a Mi Pass. Reintentos de click disparan otro pagar-express
+  // y rompen el SSO (obrareq) → "Presentamos intermitencias".
+  let miPassActive = await isMiPassAuthorizing();
+  if (!miPassActive) {
     {
-      const ended = await guard.check(`mipass-intento-${attempt}`);
+      const ended = await guard.check("pre-mipass-click");
       if (ended) return ended;
     }
-    const rect = await getMiPassRect();
+    let rect = await getMiPassRect();
     if (!rect) {
-      // Suele ser "Presentamos intermitencias" u otro bloqueo del portal.
-      const blocked = await guard.check("sin-card-mipass");
-      if (blocked) return blocked;
-      await capture("sin-card-mipass");
-      return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
-    }
-    await page.mouse.click(rect.x, rect.y);
-    await delay(2000);
-    miPassActive = await isMiPassActivated();
-    if (miPassActive) break;
-
-    if (attempt === 2) {
-      const innerRect = await page.evaluate(() => {
-        const el = document.querySelector(".text-content-cajaDesafio");
-        if (!el || !(el.textContent || "").includes("Mi Pass")) return null;
-        (el as HTMLElement).scrollIntoView({ block: "center" });
-        const r = el.getBoundingClientRect();
-        return r.width > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null;
-      });
-      if (innerRect) {
-        await page.mouse.click(innerRect.x, innerRect.y);
-        await delay(2000);
+      // Esperar un poco a que Angular pinte las cards (sin clickear nada).
+      for (let wait = 0; wait < 5 && !rect; wait++) {
+        await delay(1000);
+        const ended = await guard.check(`esperando-card-mipass-${wait + 1}`);
+        if (ended) return ended;
+        if (await isMiPassAuthorizing()) {
+          miPassActive = true;
+          break;
+        }
+        rect = await getMiPassRect();
       }
-      miPassActive = await isMiPassActivated();
     }
-
-    if (attempt === 3) {
-      try {
-        await page.click(".card-left-content-miPass");
-        await delay(2000);
-        miPassActive = await isMiPassActivated();
-      } catch {
-        // ignore
+    if (!miPassActive) {
+      if (!rect) {
+        const blocked = await guard.check("sin-card-mipass");
+        if (blocked) return blocked;
+        await capture("sin-card-mipass");
+        return { success: false, error: "No se encontró el card TRANSFIERE CON Mi Pass en la página." };
+      }
+      await page.mouse.click(rect.x, rect.y);
+      await capture("despues-click-mipass");
+      // Esperar a "AUTORIZANDO CON MI PASS" sin volver a clickear.
+      for (let wait = 0; wait < 15 && !miPassActive; wait++) {
+        await delay(1000);
+        {
+          const ended = await guard.check(`post-mipass-click-${wait + 1}`);
+          if (ended) return ended;
+        }
+        miPassActive = await isMiPassAuthorizing();
       }
     }
   }

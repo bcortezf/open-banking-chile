@@ -4,6 +4,7 @@ import {
   detectPortalBlockerText,
   INTERMITENCIAS_ERROR,
   isIntermitenciasText,
+  isMiPassAuthorizingText,
   isSessionFinalizadaText,
   isSistemaErrorText,
   isTefSaldoUrl,
@@ -110,3 +111,17 @@ describe("isSistemaErrorText / detectPortalBlockerText", () => {
     expect(detectPortalBlockerText("Transferencia Express Datos de la Transferencia")).toBe(null);
   });
 });
+
+describe("isMiPassAuthorizingText", () => {
+  it("detecta AUTORIZANDO CON MI PASS", () => {
+    expect(isMiPassAuthorizingText("← AUTORIZANDO CON MI PASS")).toBe(true);
+    expect(isMiPassAuthorizingText("Autorizando con Mi Pass\nEspere aprobación")).toBe(true);
+    expect(isMiPassAuthorizingText("autorizando con mipass")).toBe(true);
+  });
+
+  it("no marca el card previo al click", () => {
+    expect(isMiPassAuthorizingText("AUTORIZA ESTA OPERACIÓN CON TU DISPOSITIVO DE SEGURIDAD\nTRANSFIERE CON\nMi Pass\nDigipass")).toBe(false);
+    expect(isMiPassAuthorizingText("Transferencia Express Saldo en Cuenta")).toBe(false);
+  });
+});
+
