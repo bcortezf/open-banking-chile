@@ -3,6 +3,7 @@ import type { BankMovement, BankScraper, ScrapeResult, ScraperOptions } from "..
 import { MOVEMENT_SOURCE } from "../types.js";
 import { deduplicateMovements, closePopups, delay, normalizeDate, parseChileanAmount } from "../utils.js";
 import { createInterceptor } from "../intercept.js";
+import type { Interceptor } from "../intercept.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { fillRut, fillPassword, clickSubmit, detectLoginError } from "../actions/login.js";
@@ -172,9 +173,71 @@ const TWO_FACTOR_CONFIG = {
   },
 };
 
+// ─── Credit card: one pass per currency sub-tab ──────────────────────
+
+const TC_CURRENCIES = [
+  { label: "pesos", currency: "CLP" },
+  { label: "dólares", currency: "USD" },
+] as const;
+
+interface CreditCardTabParams {
+  tabText: string;
+  endpointId: string;
+  tab: "unbilled" | "billed";
+  normalize: (captures: unknown[]) => BankMovement[];
+  logLabel: string;
+}
+
+/**
+ * Reads one credit-card tab (por facturar / facturados) once per currency sub-tab.
+ * The tab opens on pesos, so that pass reuses what the page already fetched; for dólares the
+ * endpoint is cleared first, otherwise waitFor() would hand back the pesos captures. Each pass
+ * prefers the intercepted API and falls back to the HTML table, tagging the currency either way.
+ */
+export async function collectCreditCardTab(
+  page: Page,
+  interceptor: Interceptor,
+  debugLog: string[],
+  { tabText, endpointId, tab, normalize, logLabel }: CreditCardTabParams,
+): Promise<BankMovement[]> {
+  if (!(await clickTcTab(page, tabText))) return [];
+
+  const movements: BankMovement[] = [];
+  let switchedAway = false;
+
+  for (const { label, currency } of TC_CURRENCIES) {
+    let captures: unknown[];
+    if (currency === "CLP") {
+      captures = await interceptor.waitFor(endpointId, 10_000);
+    } else {
+      interceptor.clear(endpointId);
+      if (!(await clickTcTab(page, label))) {
+        debugLog.push(`  ${logLabel}: no se pudo cambiar a ${label}`);
+        continue;
+      }
+      switchedAway = true;
+      captures = await interceptor.waitFor(endpointId, 8_000);
+    }
+
+    let found: BankMovement[];
+    if (captures.length > 0) {
+      found = normalize(captures);
+      for (const m of found) m.currency = currency;
+    } else {
+      found = await extractCreditCardMovements(page, tab, currency);
+    }
+    movements.push(...found);
+    debugLog.push(`  ${logLabel} [${currency}]: ${found.length} movement(s)`);
+  }
+
+  // Leave the page on pesos so the next tab starts from its default state.
+  if (switchedAway) await clickTcTab(page, "pesos");
+  return movements;
+}
+
 // ─── Santander-specific helpers ──────────────────────────────────────
 
-type MovementAccount = { index: number; label: string };
+type MovementAccount = { index: number; label: string; currency: "CLP" | "USD" };
 
 async function getLoginFrame(page: Page): Promise<Frame | null> {
   const handle = await page.$("iframe#login-frame");
@@ -184,7 +247,7 @@ async function getLoginFrame(page: Page): Promise<Frame | null> {
 async function listMovementAccounts(page: Page): Promise<MovementAccount[]> {
   return await page.evaluate(() => {
     const slides = Array.from(document.querySelectorAll("#tabs-carousel-movs .swiper-slide"));
-    const out: Array<{ index: number; label: string }> = [];
+    const out: Array<{ index: number; label: string; currency: "CLP" | "USD" }> = [];
     for (let i = 0; i < slides.length; i++) {
       const slide = slides[i] as HTMLElement;
       const text = slide.innerText?.replace(/\s+/g, " ").trim() || "";
@@ -193,7 +256,10 @@ async function listMovementAccounts(page: Page): Promise<MovementAccount[]> {
       const numberMatch = text.match(/\d(?:[\s.]\d+){3,}/);
       const type = typeMatch ? `Cuenta ${typeMatch[1]}` : "Cuenta";
       const number = numberMatch ? numberMatch[0].replace(/\s+/g, " ").trim() : `#${i + 1}`;
-      out.push({ index: i, label: `${type} ${number}`.trim() });
+      // Santander muestra "Cuenta Corriente Dólar" para la cuenta en USD — no hay otro
+      // indicador estructurado (la API de movimientos tampoco trae moneda ni cuenta).
+      const currency: "CLP" | "USD" = /US\$|USD|d[oó]lar/i.test(text) ? "USD" : "CLP";
+      out.push({ index: i, label: `${type} ${number}`.trim(), currency });
     }
     return out;
   });
@@ -430,36 +496,71 @@ async function scrapeSantander(
   // Multi-account handling
   const accounts = await listMovementAccounts(page);
   if (accounts.length > 0) {
-    debugLog.push(`  Accounts: ${accounts.map((a) => a.label).join(" | ")}`);
+    debugLog.push(`  Accounts: ${accounts.map((a) => `${a.label} [${a.currency}]`).join(" | ")}`);
   }
 
   let movements: BankMovement[] = [];
 
-  // Try API interception for checking account
-  const checkingCaptures = await interceptor.waitFor("santander-checking", 10_000);
-  if (checkingCaptures.length > 0) {
-    debugLog.push(`  Checking API: ${checkingCaptures.length} response(s) captured`);
-    const apiMovements = normalizeSantanderCheckingApiMovements(checkingCaptures);
-    debugLog.push(`  Checking API movements: ${apiMovements.length}`);
-    if (apiMovements.length > 0) {
+  // La API de cuentas se consulta al cargar la página, para la cuenta que esté activa en el
+  // carrusel — la reutilizamos para esa cuenta en vez de perderla al hacer `clear()` más abajo.
+  const initialCaptures = await interceptor.waitFor("santander-checking", 10_000);
+  const initialActiveIndex = await page.evaluate(() => {
+    const slides = Array.from(document.querySelectorAll("#tabs-carousel-movs .swiper-slide"));
+    return slides.findIndex((s) => (s as HTMLElement).className.includes("swiper-slide-active"));
+  });
+
+  if (accounts.length <= 1) {
+    const currency = accounts[0]?.currency ?? "CLP";
+    if (initialCaptures.length > 0) {
+      debugLog.push(`  Checking API: ${initialCaptures.length} response(s) captured`);
+      const apiMovements = normalizeSantanderCheckingApiMovements(initialCaptures);
+      debugLog.push(`  Checking API movements: ${apiMovements.length}`);
+      for (const m of apiMovements) m.currency = currency;
       movements.push(...apiMovements);
     }
-  }
+    if (movements.length === 0) {
+      debugLog.push("  Checking API: no data, falling back to HTML extraction");
+      const domMovements = await paginateAndExtract(page, extractAccountMovements, debugLog);
+      for (const m of domMovements) m.currency = currency;
+      movements.push(...domMovements);
+    }
+  } else {
+    // Con varias cuentas, la API se dispara una vez por cuenta activa: hay que cambiar de
+    // cuenta en el carrusel y esperar una captura nueva por cada una — si no, la
+    // intercepción solo ve la que estaba activa al cargar y las demás se pierden en
+    // silencio (nunca se scrapean, ni siquiera mezcladas con las otras).
+    for (const account of accounts) {
+      let acctCaptures: unknown[];
+      let onAccountPage: boolean;
 
-  if (movements.length === 0) {
-    debugLog.push("  Checking API: no data, falling back to HTML extraction");
-    if (accounts.length <= 1) {
-      movements = await paginateAndExtract(page, extractAccountMovements, debugLog);
-    } else {
-      for (const account of accounts) {
-        const switched = await selectMovementAccount(page, account.index);
-        if (!switched) {
+      if (account.index === initialActiveIndex && initialCaptures.length > 0) {
+        acctCaptures = initialCaptures;
+        onAccountPage = true;
+      } else {
+        interceptor.clear("santander-checking");
+        onAccountPage = await selectMovementAccount(page, account.index);
+        if (!onAccountPage) {
           debugLog.push(`  Could not switch to ${account.label}`);
           continue;
         }
+        acctCaptures = await interceptor.waitFor("santander-checking", 8_000);
+      }
+
+      const apiMovements = acctCaptures.length > 0 ? normalizeSantanderCheckingApiMovements(acctCaptures) : [];
+
+      if (apiMovements.length > 0) {
+        for (const m of apiMovements) m.currency = account.currency;
+        movements.push(...apiMovements);
+        debugLog.push(`  ${account.label} [${account.currency}] (API): ${apiMovements.length} movement(s)`);
+      } else if (onAccountPage) {
+        // Si esta cuenta no expone movimientos por esta API (ej. Línea de Crédito, que no
+        // siempre es un producto "current-account" — o devuelve una respuesta con 0
+        // movimientos en un formato distinto), volvemos al scraping de la tabla HTML. Ya
+        // estamos en la página de esta cuenta, no hace falta volver a cambiar.
         const acctMovements = await paginateAndExtract(page, extractAccountMovements, debugLog);
+        for (const m of acctMovements) m.currency = account.currency;
         movements.push(...acctMovements);
-        debugLog.push(`  ${account.label}: ${acctMovements.length} movement(s)`);
+        debugLog.push(`  ${account.label} [${account.currency}] (HTML): ${acctMovements.length} movement(s)`);
       }
     }
   }
@@ -470,32 +571,22 @@ async function scrapeSantander(
   progress("Extrayendo movimientos de tarjeta de crédito...");
   const tcReady = await navigateToCreditCardSection(page, debugLog);
   if (tcReady) {
-    if (await clickTcTab(page, "movimientos por facturar")) {
-      const unbilledCaptures = await interceptor.waitFor("santander-credit-card-unbilled", 10_000);
-      if (unbilledCaptures.length > 0) {
-        const unbilledMovements = normalizeSantanderUnbilledApiMovements(unbilledCaptures);
-        movements.push(...unbilledMovements);
-        debugLog.push(`  CC API (unbilled): ${unbilledMovements.length} movement(s)`);
-      } else {
-        debugLog.push("  CC API (unbilled): no data, falling back to HTML extraction");
-        const unbilled = await extractCreditCardMovements(page, "unbilled");
-        movements.push(...unbilled);
-        debugLog.push(`  TC por facturar: ${unbilled.length} movement(s)`);
-      }
-    }
-    if (await clickTcTab(page, "movimientos facturados")) {
-      const billedCaptures = await interceptor.waitFor("santander-credit-card-billed", 10_000);
-      if (billedCaptures.length > 0) {
-        const billedMovements = normalizeSantanderBilledApiMovements(billedCaptures);
-        movements.push(...billedMovements);
-        debugLog.push(`  CC API (billed): ${billedMovements.length} movement(s)`);
-      } else {
-        debugLog.push("  CC API (billed): no data, falling back to HTML extraction");
-        const billed = await extractCreditCardMovements(page, "billed");
-        movements.push(...billed);
-        debugLog.push(`  TC facturados: ${billed.length} movement(s)`);
-      }
-    }
+    movements.push(
+      ...(await collectCreditCardTab(page, interceptor, debugLog, {
+        tabText: "movimientos por facturar",
+        endpointId: "santander-credit-card-unbilled",
+        tab: "unbilled",
+        normalize: normalizeSantanderUnbilledApiMovements,
+        logLabel: "TC por facturar",
+      })),
+      ...(await collectCreditCardTab(page, interceptor, debugLog, {
+        tabText: "movimientos facturados",
+        endpointId: "santander-credit-card-billed",
+        tab: "billed",
+        normalize: normalizeSantanderBilledApiMovements,
+        logLabel: "TC facturados",
+      })),
+    );
   } else {
     debugLog.push("  Could not open credit card section.");
   }

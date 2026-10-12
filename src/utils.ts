@@ -124,7 +124,7 @@ export function parseChileanAmount(text: string): number {
   const isNegative = clean.startsWith("-") || text.includes("-$");
   // Remove thousand separators (dots), convert decimal comma to dot
   const normalized = clean.replace(/-/g, "").replace(/\./g, "").replace(",", ".");
-  const amount = parseInt(normalized, 10) || 0;
+  const amount = parseFloat(normalized) || 0;
   return isNegative ? -amount : amount;
 }
 

@@ -5,10 +5,6 @@ import { parseChileanAmount, normalizeDate, deduplicateMovements, delay } from "
 
 type TcTab = "unbilled" | "billed";
 
-function isSaldoInicial(description: string): boolean {
-  return /saldo\s+inicial/i.test(description);
-}
-
 function isCreditCardCredit(description: string): boolean {
   const text = description.toLowerCase();
   return (
@@ -46,10 +42,12 @@ export async function clickTcTab(
 /**
  * Extract credit card movements from a table with Fecha/Detalle/Monto headers.
  * Determines sign based on cargo/abono columns or description heuristics.
+ * `currency` tags every returned movement (the table itself does not say which currency it is in).
  */
 export async function extractCreditCardMovements(
   page: Page,
   tab: TcTab,
+  currency: "CLP" | "USD" = "CLP",
 ): Promise<BankMovement[]> {
   const raw = await page.evaluate(() => {
     const table = Array.from(document.querySelectorAll("table")).find((t) => {
@@ -88,7 +86,9 @@ export async function extractCreditCardMovements(
       if (hasDate) lastDate = rawDate;
 
       const description = detailIndex >= 0 ? (cells[detailIndex] || "") : "";
-      if (isSaldoInicial(description)) continue;
+      // Inline on purpose: this callback is serialized and runs in the browser, where
+      // helpers defined in this module do not exist.
+      if (/saldo\s+inicial/i.test(description)) continue;
 
       let amount = "";
       if (cargoIndex >= 0 && cells[cargoIndex]) {
@@ -131,6 +131,7 @@ export async function extractCreditCardMovements(
         amount,
         balance: 0,
         source,
+        currency,
       } as BankMovement;
     })
     .filter(Boolean) as BankMovement[];

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { DebugLog, deduplicateMovements } from "./utils.js";
+import { DebugLog, deduplicateMovements, parseChileanAmount } from "./utils.js";
 import { MOVEMENT_SOURCE } from "./types.js";
 import type { BankMovement } from "./types.js";
 
@@ -116,5 +116,28 @@ describe("deduplicateMovements", () => {
     const b = movement({ description: "B", balance: 200 });
     const result = deduplicateMovements([a, b, a]);
     expect(result.map((m) => m.description)).toEqual(["A", "B"]);
+  });
+});
+
+// ─── parseChileanAmount ──────────────────────────────────────────
+
+describe("parseChileanAmount", () => {
+  it("parses integer CLP amounts with thousand separators", () => {
+    expect(parseChileanAmount("$1.234.567")).toBe(1234567);
+  });
+
+  it("keeps decimals written with a comma (USD amounts)", () => {
+    expect(parseChileanAmount("US$ 1.234,56")).toBe(1234.56);
+    expect(parseChileanAmount("12,5")).toBe(12.5);
+  });
+
+  it("keeps the sign for negative amounts, with or without decimals", () => {
+    expect(parseChileanAmount("-$1.000")).toBe(-1000);
+    expect(parseChileanAmount("-1.000,25")).toBe(-1000.25);
+  });
+
+  it("returns 0 for empty or non-numeric input", () => {
+    expect(parseChileanAmount("")).toBe(0);
+    expect(parseChileanAmount("n/a")).toBe(0);
   });
 });
